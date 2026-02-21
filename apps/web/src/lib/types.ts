@@ -42,3 +42,37 @@ export type AgentActionDecision = {
     expiresAt: string;
   };
 };
+
+export type MailFolder = "inbox" | "important" | "sent" | "drafts" | "trash" | "spam" | "snoozed" | "all";
+
+export type MailThread = {
+  id: string;
+  subject: string;
+  participants: string[];
+  snippet?: string;
+  lastMessageAt: string;
+  unread?: boolean;
+  state: string;
+  priority?: PriorityScore;
+};
+
+export type MailMessage = {
+  id: string;
+  sender: string;
+  body: string;
+  timestamp: string;
+  labelIds?: string[];
+};
+
+export type MailThreadDetail = MailThread & {
+  messages: MailMessage[];
+};
+
+export type MailComposePayload = {
+  threadId?: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+};

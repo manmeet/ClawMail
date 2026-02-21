@@ -180,6 +180,122 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/AuditEvent'
+  /v1/connectors:
+    get:
+      summary: List connector connection status
+      responses:
+        '200':
+          description: Connector list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        connected:
+                          type: boolean
+                        account:
+                          type: string
+                          nullable: true
+                        connectedAt:
+                          type: string
+                          format: date-time
+                          nullable: true
+  /v1/auth/google/start:
+    get:
+      summary: Start Google OAuth and return auth URL
+      responses:
+        '200':
+          description: OAuth URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authUrl:
+                    type: string
+  /v1/auth/google/callback:
+    get:
+      summary: OAuth callback endpoint
+      parameters:
+        - in: query
+          name: code
+          schema:
+            type: string
+          required: true
+      responses:
+        '200':
+          description: Connection success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connected:
+                    type: boolean
+                  connectedEmail:
+                    type: string
+  /v1/auth/google/status:
+    get:
+      summary: Get Gmail connection status
+      responses:
+        '200':
+          description: Connection status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connected:
+                    type: boolean
+                  connectedEmail:
+                    type: string
+                  connectedAt:
+                    type: string
+                    format: date-time
+  /v1/auth/google/disconnect:
+    post:
+      summary: Disconnect Gmail
+      responses:
+        '200':
+          description: Disconnected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disconnected:
+                    type: boolean
+  /v1/sync/gmail:
+    post:
+      summary: Sync Gmail inbox into local thread store
+      parameters:
+        - in: query
+          name: maxResults
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Sync complete
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  synced:
+                    type: boolean
+                  connectedEmail:
+                    type: string
+                  importedThreads:
+                    type: integer
 components:
   parameters:
     ThreadId:

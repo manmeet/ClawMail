@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 const now = Date.now();
-const threads = [
+const defaultThreads = [
   {
     id: "t1",
     subject: "Need decision on Q2 hiring plan by 4PM",
@@ -93,6 +93,19 @@ const threads = [
     priority: { score: 0.67, level: "P2", reasons: ["Operational workload"] }
   }
 ];
+let threads = [...defaultThreads];
+const threadMessages = new Map<string, { sender: string; body: string; timestamp: string }[]>();
+const mailDrafts: Array<{
+  id: string;
+  threadId?: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+  status: "drafted" | "sent";
+  createdAt: string;
+}> = [];
 
 const tasks: Array<Record<string, unknown>> = [];
 const drafts: Array<Record<string, unknown>> = [];
@@ -102,20 +115,54 @@ export function listThreads(view?: string) {
   return threads.filter((t) => t.state === view || (view === "priority" && (t.priority.level === "P1" || t.priority.level === "P2")));
 }
 
+export function listMailThreads(folder: string, query?: string) {
+  let filtered = [...threads];
+  if (folder === "priority" || folder === "important") {
+    filtered = filtered.filter((t) => t.priority.level === "P1" || t.priority.level === "P2");
+  } else if (folder === "snoozed") {
+    filtered = filtered.filter((t) => t.state === "snoozed");
+  } else if (folder === "waiting") {
+    filtered = filtered.filter((t) => t.state === "waiting");
+  } else if (folder === "done") {
+    filtered = filtered.filter((t) => t.state === "done");
+  } else if (folder === "inbox") {
+    filtered = filtered.filter((t) => t.state !== "done");
+  }
+
+  if (query?.trim()) {
+    const q = query.trim().toLowerCase();
+    filtered = filtered.filter(
+      (thread) =>
+        thread.subject.toLowerCase().includes(q) ||
+        (thread.snippet ?? "").toLowerCase().includes(q) ||
+        thread.participants.some((participant) => participant.toLowerCase().includes(q))
+    );
+  }
+
+  return filtered;
+}
+
 export function getThread(threadId: string) {
   const thread = threads.find((t) => t.id === threadId);
   if (!thread) return undefined;
+  const messages = threadMessages.get(thread.id);
 
   return {
     ...thread,
-    messages: [
-      {
-        id: `m-${thread.id}`,
-        sender: thread.participants[0],
-        body: thread.snippet ?? "No message preview available.",
-        timestamp: thread.lastMessageAt
-      }
-    ]
+    messages:
+      messages?.map((message, index) => ({
+        id: `m-${thread.id}-${index + 1}`,
+        sender: message.sender,
+        body: message.body,
+        timestamp: message.timestamp
+      })) ?? [
+        {
+          id: `m-${thread.id}`,
+          sender: thread.participants[0],
+          body: thread.snippet ?? "No message preview available.",
+          timestamp: thread.lastMessageAt
+        }
+      ]
   };
 }
 
@@ -129,6 +176,125 @@ export function createDraft(threadId: string, tone: string, constraints?: string
   };
   drafts.push(draft);
   return draft;
+}
+
+export function createMailDraft(payload: {
+  threadId?: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+}) {
+  const draft = {
+    id: randomUUID(),
+    threadId: payload.threadId,
+    to: payload.to,
+    cc: payload.cc ?? [],
+    bcc: payload.bcc ?? [],
+    subject: payload.subject,
+    body: payload.body,
+    status: "drafted" as const,
+    createdAt: new Date().toISOString()
+  };
+
+  mailDrafts.push(draft);
+  return draft;
+}
+
+export function sendMailDraft(draftId: string) {
+  const draft = mailDrafts.find((item) => item.id === draftId);
+  if (!draft) return null;
+  draft.status = "sent";
+
+  if (draft.threadId) {
+    const existing = threads.find((thread) => thread.id === draft.threadId);
+    if (existing) {
+      existing.lastMessageAt = new Date().toISOString();
+      existing.snippet = draft.body.slice(0, 180);
+    }
+    const next = threadMessages.get(draft.threadId) ?? [];
+    next.push({
+      sender: "you@gmail.com",
+      body: draft.body,
+      timestamp: new Date().toISOString()
+    });
+    threadMessages.set(draft.threadId, next);
+  }
+
+  return draft;
+}
+
+export function sendMailMessage(payload: {
+  threadId?: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+}) {
+  if (payload.threadId) {
+    const nowIso = new Date().toISOString();
+    const existing = threads.find((thread) => thread.id === payload.threadId);
+    if (existing) {
+      existing.lastMessageAt = nowIso;
+      existing.snippet = payload.body.slice(0, 180);
+    }
+
+    const next = threadMessages.get(payload.threadId) ?? [];
+    next.push({
+      sender: "you@gmail.com",
+      body: payload.body,
+      timestamp: nowIso
+    });
+    threadMessages.set(payload.threadId, next);
+
+    return {
+      id: `msg_${randomUUID().slice(0, 10)}`,
+      threadId: payload.threadId
+    };
+  }
+
+  const threadId = `local_${randomUUID().slice(0, 8)}`;
+  const nowIso = new Date().toISOString();
+
+  threads.unshift({
+    id: threadId,
+    subject: payload.subject || "(No subject)",
+    participants: [payload.to[0] ?? "unknown@recipient", "you@gmail.com"],
+    snippet: payload.body.slice(0, 180),
+    lastMessageAt: nowIso,
+    state: "inbox",
+    priority: { score: 0.52, level: "P3", reasons: ["Outgoing message"] }
+  });
+
+  threadMessages.set(threadId, [
+    {
+      sender: "you@gmail.com",
+      body: payload.body,
+      timestamp: nowIso
+    }
+  ]);
+
+  return {
+    id: `msg_${randomUUID().slice(0, 10)}`,
+    threadId
+  };
+}
+
+export function applyThreadAction(threadId: string, action: string) {
+  const thread = threads.find((item) => item.id === threadId);
+  if (!thread) return null;
+
+  if (action === "archive") thread.state = "done";
+  if (action === "unarchive") thread.state = "inbox";
+  if (action === "snooze") thread.state = "snoozed";
+  if (action === "unsnooze") thread.state = "inbox";
+  if (action === "trash") thread.state = "done";
+  if (action === "mark_read") (thread as Record<string, unknown>).unread = false;
+  if (action === "mark_unread") (thread as Record<string, unknown>).unread = true;
+
+  return thread;
 }
 
 export function approveAndSendDraft(draftId: string) {
@@ -152,4 +318,45 @@ export function createTask(payload: { threadId: string; title: string; dueAt?: s
   };
   tasks.push(task);
   return task;
+}
+
+export function replaceThreadsWithGmail(
+  gmailThreads: Array<{
+    id: string;
+    subject: string;
+    from: string;
+    snippet: string;
+    timestamp: string;
+    body: string;
+    state: "inbox" | "priority" | "needs_reply" | "waiting" | "snoozed" | "delegated" | "done";
+    priority: { score: number; level: "P1" | "P2" | "P3"; reasons: string[] };
+  }>
+) {
+  if (gmailThreads.length === 0) return;
+
+  threads = gmailThreads.map((thread) => ({
+    id: thread.id,
+    subject: thread.subject,
+    participants: [thread.from, "you@gmail.com"],
+    snippet: thread.snippet,
+    lastMessageAt: thread.timestamp,
+    state: thread.state,
+    priority: thread.priority
+  }));
+
+  threadMessages.clear();
+  for (const thread of gmailThreads) {
+    threadMessages.set(thread.id, [
+      {
+        sender: thread.from,
+        body: thread.body || thread.snippet,
+        timestamp: thread.timestamp
+      }
+    ]);
+  }
+}
+
+export function resetThreadsToMockData() {
+  threads = [...defaultThreads];
+  threadMessages.clear();
 }

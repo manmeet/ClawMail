@@ -1,4 +1,14 @@
-import type { AgentActionDecision, AgentActionIntent, Thread, ThreadDetail, ViewName } from "./types";
+import type {
+  AgentActionDecision,
+  AgentActionIntent,
+  MailComposePayload,
+  MailFolder,
+  MailThread,
+  MailThreadDetail,
+  Thread,
+  ThreadDetail,
+  ViewName
+} from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
@@ -55,4 +65,78 @@ export async function createDraft(threadId: string, tone: "concise" | "friendly"
   });
 
   return parseResponse<{ id: string; content: string; status: string }>(response);
+}
+
+export async function getConnectors() {
+  const response = await fetch(`${API_BASE_URL}/v1/connectors`);
+  return parseResponse<{
+    items: Array<{
+      id: string;
+      name: string;
+      connected: boolean;
+      account: string | null;
+      connectedAt: string | null;
+    }>;
+  }>(response);
+}
+
+export async function startGoogleAuth() {
+  const response = await fetch(`${API_BASE_URL}/v1/auth/google/start`);
+  return parseResponse<{ authUrl: string }>(response);
+}
+
+export async function syncGmail(maxResults = 25) {
+  const response = await fetch(`${API_BASE_URL}/v1/sync/gmail?maxResults=${maxResults}`, {
+    method: "POST"
+  });
+  return parseResponse<{ synced: boolean; connectedEmail?: string; importedThreads: number }>(response);
+}
+
+export async function listMailThreads(folder: MailFolder, q?: string) {
+  const query = new URLSearchParams({ folder });
+  if (q?.trim()) query.set("q", q.trim());
+  const response = await fetch(`${API_BASE_URL}/v1/mail/threads?${query.toString()}`);
+  return parseResponse<{ source: "gmail" | "mock"; items: MailThread[] }>(response);
+}
+
+export async function getMailThread(threadId: string) {
+  const response = await fetch(`${API_BASE_URL}/v1/mail/threads/${threadId}`);
+  return parseResponse<{ source: "gmail" | "mock"; item: MailThreadDetail }>(response);
+}
+
+export async function createMailDraft(payload: MailComposePayload) {
+  const response = await fetch(`${API_BASE_URL}/v1/mail/drafts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  return parseResponse<{ source: "gmail" | "mock"; item: { id: string; status: string; threadId?: string } }>(response);
+}
+
+export async function sendMailDraft(draftId: string) {
+  const response = await fetch(`${API_BASE_URL}/v1/mail/drafts/${draftId}/send`, {
+    method: "POST"
+  });
+  return parseResponse<{ source: "gmail" | "mock"; item: { id?: string; status: string; threadId?: string } }>(response);
+}
+
+export async function sendMail(payload: MailComposePayload) {
+  const response = await fetch(`${API_BASE_URL}/v1/mail/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  return parseResponse<{ source: "gmail" | "mock"; item: { id?: string; threadId?: string } }>(response);
+}
+
+export async function applyMailThreadAction(
+  threadId: string,
+  action: "archive" | "unarchive" | "mark_read" | "mark_unread" | "snooze" | "unsnooze" | "trash"
+) {
+  const response = await fetch(`${API_BASE_URL}/v1/mail/threads/${threadId}/actions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action })
+  });
+  return parseResponse<{ source: "gmail" | "mock"; item: unknown }>(response);
 }

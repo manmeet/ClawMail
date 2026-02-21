@@ -1,216 +1,368 @@
 "use client";
 
-import { useMemo, useState, useEffect, useCallback, useRef } from "react";
-import { shortcutHelp } from "../lib/shortcuts";
-import { createDraft, fetchInbox, fetchThread, runAgentAction } from "../lib/api";
-import type { AgentActionIntent, Thread, ThreadDetail, ViewName } from "../lib/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  applyMailThreadAction,
+  createMailDraft,
+  getConnectors,
+  getMailThread,
+  listMailThreads,
+  sendMail,
+  sendMailDraft,
+  startGoogleAuth,
+  syncGmail
+} from "../lib/api";
+import type { MailComposePayload, MailFolder, MailThread, MailThreadDetail } from "../lib/types";
 
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-};
-
-const views: { id: ViewName; label: string }[] = [
-  { id: "inbox", label: "Inbox" },
-  { id: "priority", label: "Important" },
-  { id: "needs-reply", label: "Needs Reply" },
-  { id: "waiting", label: "Waiting" },
-  { id: "snoozed", label: "Snoozed" },
-  { id: "delegated", label: "Delegated" },
-  { id: "done", label: "Done" }
+const folders: Array<{ id: MailFolder; label: string; shortcut: string }> = [
+  { id: "inbox", label: "Inbox", shortcut: "g i" },
+  { id: "important", label: "Important", shortcut: "g p" },
+  { id: "snoozed", label: "Snoozed", shortcut: "h" },
+  { id: "sent", label: "Sent", shortcut: "g s" },
+  { id: "drafts", label: "Drafts", shortcut: "g d" },
+  { id: "trash", label: "Trash", shortcut: "#" }
 ];
 
-const accountTabs = [
-  "Important (614) - msm@trexorobotics.com",
-  "Important (332) - naturalravine@gmail.com",
-  "Important (149) - manmeet.maggu@gmail.com",
-  "Inbox - ajooni.maggu@gmail.com"
-];
+const focusTabs = ["Investors", "FDA", "Signature", "VPM", "PandaDoc", "Calendar", "Other"];
 
-const quickBuckets = ["Investors", "FDA", "Signature", "VPM", "PandaDoc", "Calendar", "Other"];
-
-function formatRelative(isoDate: string): string {
-  const diffMs = Date.now() - new Date(isoDate).getTime();
-  const mins = Math.max(1, Math.floor(diffMs / 60000));
+function relTime(iso: string) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.max(1, Math.floor(diff / 60000));
   if (mins < 60) return `${mins}m`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h`;
   return `${Math.floor(hrs / 24)}d`;
 }
 
-function makeMessage(role: ChatMessage["role"], text: string): ChatMessage {
-  return { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, role, text };
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || target.isContentEditable;
 }
 
 export function InboxShell() {
-  const [view, setView] = useState<ViewName>("priority");
+  const [folder, setFolder] = useState<MailFolder>("important");
+  const [query, setQuery] = useState("");
+  const [threads, setThreads] = useState<MailThread[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [isThreadOpen, setIsThreadOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isCommandOpen, setIsCommandOpen] = useState(false);
-
-  const [threads, setThreads] = useState<Thread[]>([]);
-  const [listLoading, setListLoading] = useState(true);
+  const [isLoadingList, setIsLoadingList] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
 
-  const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null);
-  const [threadLoading, setThreadLoading] = useState(false);
+  const [openedThreadId, setOpenedThreadId] = useState<string | null>(null);
+  const [threadDetail, setThreadDetail] = useState<MailThreadDetail | null>(null);
+  const [isLoadingThread, setIsLoadingThread] = useState(false);
   const [threadError, setThreadError] = useState<string | null>(null);
 
-  const [chatInput, setChatInput] = useState("Draft a concise response using Drive context.");
-  const [chatLoading, setChatLoading] = useState(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    makeMessage("assistant", "Thread-aware executive assistant is online. Open a thread and assign work.")
-  ]);
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeDraftId, setComposeDraftId] = useState<string | null>(null);
+  const [composePayload, setComposePayload] = useState<MailComposePayload>({
+    to: [],
+    cc: [],
+    bcc: [],
+    subject: "",
+    body: ""
+  });
 
-  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
-  const lastThreadContextRef = useRef<string | null>(null);
+  const [gmailConnected, setGmailConnected] = useState(false);
+  const [gmailAccount, setGmailAccount] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [isWorking, setIsWorking] = useState(false);
+  const [isCommandOpen, setIsCommandOpen] = useState(false);
 
-  useEffect(() => {
-    let isMounted = true;
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const replyRef = useRef<HTMLTextAreaElement | null>(null);
+  const commandRef = useRef<HTMLInputElement | null>(null);
+  const agentRef = useRef<HTMLTextAreaElement | null>(null);
+  const threadConversationRef = useRef<HTMLDivElement | null>(null);
 
-    async function loadInbox() {
-      try {
-        setListLoading(true);
-        setListError(null);
-        const data = await fetchInbox(view);
-        if (!isMounted) return;
-        setThreads(data);
-        setSelectedIndex(0);
-        setIsThreadOpen(false);
-      } catch (error) {
-        if (!isMounted) return;
-        setListError(error instanceof Error ? error.message : "Failed to load inbox");
-      } finally {
-        if (isMounted) setListLoading(false);
-      }
+  const selectedThread = useMemo(() => threads[selectedIndex] ?? null, [threads, selectedIndex]);
+
+  const refreshThreads = useCallback(async () => {
+    setIsLoadingList(true);
+    setListError(null);
+    try {
+      const result = await listMailThreads(folder, query);
+      setThreads(result.items);
+      setSelectedIndex(0);
+    } catch (error) {
+      setListError(error instanceof Error ? error.message : "Failed to load threads");
+    } finally {
+      setIsLoadingList(false);
     }
+  }, [folder, query]);
 
-    loadInbox();
-    return () => {
-      isMounted = false;
-    };
-  }, [view]);
-
-  const current = useMemo(() => {
-    if (threads.length === 0) return null;
-    return threads[Math.min(selectedIndex, Math.max(threads.length - 1, 0))] ?? null;
-  }, [threads, selectedIndex]);
+  const refreshConnector = useCallback(async () => {
+    try {
+      const connectors = await getConnectors();
+      const gmail = connectors.items.find((item) => item.id === "gmail");
+      setGmailConnected(Boolean(gmail?.connected));
+      setGmailAccount(gmail?.account ?? null);
+    } catch {
+      setGmailConnected(false);
+      setGmailAccount(null);
+    }
+  }, []);
 
   useEffect(() => {
-    const threadId = current?.id ?? "";
-    if (!threadId) {
-      setThreadDetail(null);
+    void refreshThreads();
+  }, [refreshThreads]);
+
+  useEffect(() => {
+    void refreshConnector();
+  }, [refreshConnector]);
+
+  useEffect(() => {
+    if (!isCommandOpen) return;
+    const timer = window.setTimeout(() => commandRef.current?.focus(), 20);
+    return () => window.clearTimeout(timer);
+  }, [isCommandOpen]);
+
+  const scrollThreadToBottom = useCallback(() => {
+    const container = threadConversationRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, []);
+
+  const openThread = useCallback(async (threadId: string, options?: { openComposer?: boolean }) => {
+    setOpenedThreadId(threadId);
+    setThreadError(null);
+    setIsLoadingThread(true);
+    try {
+      const result = await getMailThread(threadId);
+      setThreadDetail(result.item);
+      setThreads((prev) => prev.map((thread) => (thread.id === threadId ? { ...thread, unread: false } : thread)));
+
+      const sender = result.item.messages?.[0]?.sender ?? result.item.participants?.[0] ?? "";
+      const nextSubject = result.item.subject.toLowerCase().startsWith("re:") ? result.item.subject : `Re: ${result.item.subject}`;
+      setComposePayload({
+        threadId: result.item.id,
+        to: sender ? [sender] : [],
+        cc: [],
+        bcc: [],
+        subject: nextSubject,
+        body: ""
+      });
+      setComposeOpen(Boolean(options?.openComposer));
+      setComposeDraftId(null);
+      void applyMailThreadAction(threadId, "mark_read").catch(() => {});
+      window.setTimeout(scrollThreadToBottom, 20);
+    } catch (error) {
+      setThreadError(error instanceof Error ? error.message : "Failed to load thread");
+    } finally {
+      setIsLoadingThread(false);
+    }
+  }, [scrollThreadToBottom]);
+
+  const openNewCompose = useCallback(() => {
+    setOpenedThreadId(null);
+    setThreadDetail(null);
+    setComposeDraftId(null);
+    setComposePayload({
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "",
+      body: ""
+    });
+    setComposeOpen(true);
+  }, []);
+
+  const parseEmails = (raw: string) =>
+    raw
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const closeOpenedThread = useCallback(() => {
+    setOpenedThreadId(null);
+    setThreadDetail(null);
+    setComposeOpen(false);
+    setComposePayload({ to: [], cc: [], bcc: [], subject: "", body: "" });
+    setComposeDraftId(null);
+  }, []);
+
+  const executeThreadAction = useCallback(
+    async (action: "archive" | "mark_read" | "mark_unread" | "snooze" | "trash") => {
+      const id = openedThreadId ?? selectedThread?.id;
+      if (!id) return;
+      setIsWorking(true);
+      setStatus(null);
+      try {
+        await applyMailThreadAction(id, action);
+        setStatus(`Applied: ${action}`);
+        if (action === "mark_read") {
+          setThreads((prev) => prev.map((thread) => (thread.id === id ? { ...thread, unread: false } : thread)));
+        }
+        if (action === "mark_unread") {
+          setThreads((prev) => prev.map((thread) => (thread.id === id ? { ...thread, unread: true } : thread)));
+        }
+        if (action === "archive" || action === "trash" || action === "snooze") {
+          setThreads((prev) => prev.filter((thread) => thread.id !== id));
+          setSelectedIndex(0);
+        }
+        if (action === "archive" || action === "trash" || action === "snooze") {
+          closeOpenedThread();
+          return;
+        }
+        await refreshThreads();
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "Action failed");
+      } finally {
+        setIsWorking(false);
+      }
+    },
+    [closeOpenedThread, openedThreadId, refreshThreads, selectedThread?.id]
+  );
+
+  const saveDraft = useCallback(async () => {
+    if (composePayload.to.length === 0) {
+      setStatus("Add at least one recipient");
       return;
     }
-
-    let isMounted = true;
-
-    async function loadThread() {
-      try {
-        setThreadLoading(true);
-        setThreadError(null);
-        const details = await fetchThread(threadId);
-        if (!isMounted) return;
-        setThreadDetail(details);
-      } catch (error) {
-        if (!isMounted) return;
-        setThreadError(error instanceof Error ? error.message : "Failed to load thread");
-      } finally {
-        if (isMounted) setThreadLoading(false);
-      }
+    setIsWorking(true);
+    try {
+      const draft = await createMailDraft(composePayload);
+      setComposeDraftId(draft.item.id ?? null);
+      setStatus("Draft saved");
+      await refreshThreads();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Draft failed");
+    } finally {
+      setIsWorking(false);
     }
+  }, [composePayload, refreshThreads]);
 
-    loadThread();
+  const sendCompose = useCallback(async () => {
+    if (composePayload.to.length === 0) {
+      setStatus("Add at least one recipient");
+      return;
+    }
+    setIsWorking(true);
+    try {
+      const messageBody = composePayload.body;
+      const threadId = composePayload.threadId ?? openedThreadId ?? undefined;
+      const sentAt = new Date().toISOString();
+      if (composeDraftId) {
+        await sendMailDraft(composeDraftId);
+      } else {
+        await sendMail(composePayload);
+      }
+      setStatus("Message sent");
 
-    return () => {
-      isMounted = false;
-    };
-  }, [current?.id]);
+      const isReplyInOpenThread = Boolean(openedThreadId && threadId && openedThreadId === threadId);
+      if (isReplyInOpenThread && threadId) {
+        setThreadDetail((prev) => {
+          if (!prev || prev.id !== threadId) return prev;
+          return {
+            ...prev,
+            snippet: messageBody.slice(0, 180),
+            lastMessageAt: sentAt,
+            messages: [
+              ...prev.messages,
+              {
+                id: `local-sent-${Date.now()}`,
+                sender: gmailAccount ?? "you",
+                body: messageBody,
+                timestamp: sentAt
+              }
+            ]
+          };
+        });
+        setThreads((prev) =>
+          prev.map((thread) =>
+            thread.id === threadId
+              ? {
+                  ...thread,
+                  snippet: messageBody.slice(0, 180),
+                  lastMessageAt: sentAt,
+                  unread: false
+                }
+              : thread
+          )
+        );
+        setComposeOpen(false);
+        setComposeDraftId(null);
+        setComposePayload((prev) => ({ ...prev, body: "" }));
+        void refreshThreads();
+        window.setTimeout(scrollThreadToBottom, 20);
+      } else {
+        closeOpenedThread();
+        await refreshThreads();
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Send failed");
+    } finally {
+      setIsWorking(false);
+    }
+  }, [closeOpenedThread, composeDraftId, composePayload, gmailAccount, openedThreadId, refreshThreads, scrollThreadToBottom]);
+
+  const connectGmail = useCallback(async () => {
+    try {
+      const { authUrl } = await startGoogleAuth();
+      window.open(authUrl, "_blank", "noopener,noreferrer");
+      setStatus("Opened Google OAuth consent");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Failed to start OAuth");
+    }
+  }, []);
+
+  const syncInbox = useCallback(async () => {
+    setIsWorking(true);
+    try {
+      const result = await syncGmail(50);
+      setStatus(`Synced ${result.importedThreads} threads`);
+      await refreshThreads();
+      await refreshConnector();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Sync failed");
+    } finally {
+      setIsWorking(false);
+    }
+  }, [refreshConnector, refreshThreads]);
 
   useEffect(() => {
-    if (!current) return;
-    if (lastThreadContextRef.current === current.id) return;
-
-    lastThreadContextRef.current = current.id;
-    setChatMessages((prev) => [
-      ...prev,
-      makeMessage("system", `Context switched to thread: ${current.subject} (${current.participants[0] ?? "Unknown"}).`)
-    ]);
-  }, [current]);
-
-  const runIntent = useCallback(
-    async (prompt: string, intent: AgentActionIntent) => {
-      if (!current?.id) {
-        setChatMessages((prev) => [...prev, makeMessage("assistant", "Select a thread first so I can act with context.")]);
+    const onKey = (event: KeyboardEvent) => {
+      const ctrlOrMeta = event.metaKey || event.ctrlKey;
+      if (ctrlOrMeta && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setIsCommandOpen(true);
         return;
       }
 
-      setChatLoading(true);
-      try {
-        if (intent === "draft") {
-          const draft = await createDraft(current.id, "concise", prompt);
-          setChatMessages((prev) => [...prev, makeMessage("assistant", `Draft ready:\n\n${draft.content}`)]);
+      if (event.key === "Escape") {
+        event.preventDefault();
+
+        if (isCommandOpen) {
+          setIsCommandOpen(false);
+          const activeElement = document.activeElement;
+          if (activeElement instanceof HTMLElement) activeElement.blur();
           return;
         }
 
-        const decision = await runAgentAction(current.id, intent, { prompt, scope: "thread" });
-        const tool = decision.proposedToolCalls?.[0]?.tool;
-        const approval = decision.approval ? ` Approval required (${decision.approval.actionType}).` : "";
-        const detail = tool ? ` Tool: ${tool}.` : "";
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && isTypingTarget(active)) {
+          active.blur();
+          return;
+        }
 
-        setChatMessages((prev) => [
-          ...prev,
-          makeMessage("assistant", `Status: ${decision.status}. ${decision.reason}.${detail}${approval}`)
-        ]);
-      } catch (error) {
-        setChatMessages((prev) => [
-          ...prev,
-          makeMessage("assistant", `Action failed: ${error instanceof Error ? error.message : "unknown error"}`)
-        ]);
-      } finally {
-        setChatLoading(false);
+        if (composeOpen) {
+          setComposeOpen(false);
+          return;
+        }
+
+        if (isSidebarOpen) {
+          setIsSidebarOpen(false);
+          return;
+        }
+
+        if (openedThreadId) {
+          closeOpenedThread();
+          return;
+        }
       }
-    },
-    [current?.id]
-  );
 
-  const sendChat = useCallback(async () => {
-    const prompt = chatInput.trim();
-    if (!prompt) return;
-
-    setChatMessages((prev) => [...prev, makeMessage("user", prompt)]);
-    setChatInput("");
-
-    const lowered = prompt.toLowerCase();
-    if (lowered.includes("draft")) {
-      await runIntent(prompt, "draft");
-      return;
-    }
-
-    if (lowered.includes("delegate")) {
-      await runIntent(prompt, "delegate");
-      return;
-    }
-
-    if (lowered.includes("priority")) {
-      await runIntent(prompt, "explain_priority");
-      return;
-    }
-
-    await runIntent(prompt, "summarize");
-  }, [chatInput, runIntent]);
-
-  const onKey = useCallback(
-    (event: KeyboardEvent) => {
-      const ctrlOrMeta = event.metaKey || event.ctrlKey;
-
-      if (ctrlOrMeta && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setIsCommandOpen((v) => !v);
-        return;
-      }
+      if (isTypingTarget(event.target) && !(ctrlOrMeta && event.key.toLowerCase() === "enter")) return;
 
       if (event.key === "j") {
         event.preventDefault();
@@ -218,233 +370,399 @@ export function InboxShell() {
         return;
       }
 
-      if (event.key === "k" && !ctrlOrMeta) {
+      if (event.key === "k") {
         event.preventDefault();
         setSelectedIndex((v) => Math.max(v - 1, 0));
         return;
       }
 
       if (event.key === "Enter" || event.key.toLowerCase() === "o") {
-        if (!isCommandOpen) {
-          event.preventDefault();
-          if (current?.id) setIsThreadOpen(true);
-        }
+        event.preventDefault();
+        if (selectedThread?.id) void openThread(selectedThread.id);
         return;
       }
 
       if (event.key.toLowerCase() === "u") {
         event.preventDefault();
-        setIsThreadOpen(false);
+        closeOpenedThread();
         return;
       }
 
-      if (event.key === "Escape") {
+      if (event.key.toLowerCase() === "c") {
         event.preventDefault();
-        if (isSidebarOpen) {
-          setIsSidebarOpen(false);
+        openNewCompose();
+        return;
+      }
+
+      if (event.key.toLowerCase() === "r" || event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        if (!openedThreadId && selectedThread?.id) {
+          void openThread(selectedThread.id, { openComposer: true });
           return;
         }
-        setIsThreadOpen(false);
+        setComposeOpen(true);
+        setTimeout(() => replyRef.current?.focus(), 30);
         return;
       }
 
-      if (event.key.toLowerCase() === "a" && !event.shiftKey && !ctrlOrMeta) {
+      if (event.key.toLowerCase() === "e") {
         event.preventDefault();
-        chatInputRef.current?.focus();
+        void executeThreadAction("archive");
         return;
       }
 
-      if (event.shiftKey && event.key === "D") {
+      if (event.key.toLowerCase() === "h") {
         event.preventDefault();
-        setChatInput("Draft a concise response with two clear commitments.");
-        void runIntent("Draft a concise response with two clear commitments.", "draft");
+        void executeThreadAction("snooze");
         return;
       }
 
-      if (event.shiftKey && event.key === "S") {
+      if (event.key.toLowerCase() === "x") {
         event.preventDefault();
-        void runIntent("Summarize this thread and recommend next action.", "summarize");
+        void executeThreadAction("mark_read");
         return;
       }
 
-      if (event.shiftKey && event.key === "P") {
+      if (event.key === "/") {
         event.preventDefault();
-        void runIntent("Explain priority and cite signals.", "explain_priority");
+        searchRef.current?.focus();
         return;
       }
 
-      if (event.shiftKey && event.key === "T") {
+      if (ctrlOrMeta && event.key.toLowerCase() === "enter") {
         event.preventDefault();
-        void runIntent("Delegate follow-up and create task with due date.", "delegate");
+        if (composeOpen) void sendCompose();
       }
-    },
-    [current?.id, isCommandOpen, isSidebarOpen, runIntent, threads.length]
-  );
 
-  useEffect(() => {
+    };
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onKey]);
-
-  const openThread = (idx: number) => {
-    setSelectedIndex(idx);
-    setIsThreadOpen(true);
-    setIsSidebarOpen(false);
-  };
+  }, [
+    closeOpenedThread,
+    composeOpen,
+    isCommandOpen,
+    executeThreadAction,
+    isSidebarOpen,
+    openNewCompose,
+    openThread,
+    openedThreadId,
+    selectedThread?.id,
+    sendCompose,
+    threads.length
+  ]);
 
   return (
-    <main className="superShell">
-      <header className="topChrome">
-        {accountTabs.map((tab, index) => (
-          <button key={tab} className={index === 0 ? "accountTab active" : "accountTab"}>
-            {tab}
+    <main className="mailApp">
+      <header className="mailTopBar">
+        <div className="topTabs">
+          <button className="topTab active">Important (615) - {gmailAccount ?? "you@gmail.com"}</button>
+          <button className="topTab">Important (332) - personal@gmail.com</button>
+          <button className="topTab">Inbox - ops@gmail.com</button>
+        </div>
+        <div className="topControls">
+          <button onClick={() => void connectGmail()}>Connect Gmail</button>
+          <button onClick={() => void syncInbox()} disabled={isWorking}>
+            Sync
           </button>
-        ))}
+          <span className="statusDot">{gmailConnected ? `Connected: ${gmailAccount ?? "gmail"}` : "Gmail not connected"}</span>
+        </div>
       </header>
 
-      <aside className="iconRail">
-        <div className="logoDot">ai</div>
-        <button className={isSidebarOpen ? "railBtn active" : "railBtn"} onClick={() => setIsSidebarOpen((v) => !v)} aria-label="toggle folders">
-          ✉
+      <aside className="rail">
+        <button className="railBrand" aria-label="assistant">
+          ai
         </button>
-        <button className="railBtn">31</button>
+        <button className="railMain" onClick={() => setIsSidebarOpen((v) => !v)} aria-label="folders">
+          ☰
+        </button>
+        <button className="railMain" onClick={() => openNewCompose()} aria-label="compose">
+          ✎
+        </button>
       </aside>
 
-      {isSidebarOpen ? <button className="drawerScrim" aria-label="close folders" onClick={() => setIsSidebarOpen(false)} /> : null}
+      {isSidebarOpen ? <button className="scrim" onClick={() => setIsSidebarOpen(false)} aria-label="close sidebar" /> : null}
+      {isCommandOpen ? <button className="commandPaletteScrim" onClick={() => setIsCommandOpen(false)} aria-label="close command palette" /> : null}
 
-      <aside className={isSidebarOpen ? "foldersPane drawer open" : "foldersPane drawer"}>
-        <div className="foldersHeader">
-          <h2>Important</h2>
-          <span>{threads.length}</span>
+      {isCommandOpen ? (
+        <section className="commandPalette" aria-label="command palette">
+          <input ref={commandRef} placeholder="Type a command..." />
+          <div className="commandList">
+            <button
+              onClick={() => {
+                setIsCommandOpen(false);
+                setOpenedThreadId(null);
+                setComposeOpen(false);
+              }}
+            >
+              Go to Inbox
+            </button>
+            <button
+              onClick={() => {
+                setIsCommandOpen(false);
+                openNewCompose();
+              }}
+            >
+              Compose new message
+            </button>
+            <button
+              onClick={() => {
+                setIsCommandOpen(false);
+                setIsSidebarOpen(true);
+              }}
+            >
+              Open inbox drawer
+            </button>
+            <button
+              onClick={() => {
+                setIsCommandOpen(false);
+                agentRef.current?.focus();
+              }}
+            >
+              Focus EA agent
+            </button>
+          </div>
+          <p className="subtle">Esc closes this pane</p>
+        </section>
+      ) : null}
+
+      <aside className={isSidebarOpen ? "folderDrawer open" : "folderDrawer"}>
+        <div className="drawerProfile">
+          <strong>{gmailAccount ?? "Executive Inbox"}</strong>
         </div>
         <nav>
-          {views.map((item) => (
+          {folders.map((item) => (
             <button
               key={item.id}
+              className={folder === item.id ? "folderBtn active" : "folderBtn"}
               onClick={() => {
-                setView(item.id);
+                setFolder(item.id);
+                closeOpenedThread();
                 setIsSidebarOpen(false);
               }}
-              className={view === item.id ? "folder active" : "folder"}
             >
-              {item.label}
+              <span>{item.label}</span>
+              <small>{item.shortcut}</small>
             </button>
           ))}
         </nav>
-        <div className="agentHint">
-          <p>EA Assistant</p>
-          <small>Always-on via `a` or `Cmd/Ctrl+K`</small>
-        </div>
       </aside>
 
-      <section className="mainPane">
-        {!isThreadOpen ? (
+      <section className="centerPane">
+        {!openedThreadId ? (
           <>
-            <div className="bucketBar">
-              <button className="hamburgerBtn" aria-label="open folders" onClick={() => setIsSidebarOpen(true)}>
-                ☰
+            <div className="centerHeader">
+              <div>
+                <h1>{folder === "important" ? "Important" : folder[0].toUpperCase() + folder.slice(1)}</h1>
+                <p>{threads.length} threads</p>
+              </div>
+              <button className="ghost" onClick={() => setIsSidebarOpen(true)}>
+                Inboxes
               </button>
-              {quickBuckets.map((bucket) => (
-                <button key={bucket} className="bucketBtn">
-                  {bucket}
-                </button>
+            </div>
+
+            <div className="focusTabs">
+              {focusTabs.map((tab) => (
+                <button key={tab}>{tab}</button>
               ))}
             </div>
 
-            {listLoading ? <p className="sub">Loading inbox...</p> : null}
-            {listError ? <p className="error">{listError}</p> : null}
+            <div className="listToolbar">
+              <input
+                ref={searchRef}
+                placeholder="Search mail..."
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void refreshThreads();
+                  }
+                }}
+              />
+              <button onClick={() => void refreshThreads()} disabled={isLoadingList}>
+                Refresh
+              </button>
+              <button onClick={() => openNewCompose()}>Compose (c)</button>
+            </div>
 
-            <ul className="threadTable">
+            {listError ? <p className="errorLine">{listError}</p> : null}
+            {isLoadingList ? <p className="subtle">Loading...</p> : null}
+
+            <ul className="threadList">
               {threads.map((thread, idx) => (
-                <li key={thread.id} onClick={() => openThread(idx)} className={idx === selectedIndex ? "mailRow active" : "mailRow"}>
-                  <div className="senderCol">
-                    <span className="dot" />
+                <li
+                  key={thread.id}
+                  data-thread-id={thread.id}
+                  className={idx === selectedIndex ? "threadRow active" : "threadRow"}
+                  onClick={() => {
+                    setSelectedIndex(idx);
+                    void openThread(thread.id);
+                  }}
+                >
+                  <div className="rowSender">
+                    <span className={thread.unread ? "dot unread" : "dot"} />
                     <strong>{thread.participants[0] ?? "Unknown"}</strong>
                   </div>
-                  <p className="subjectCol">{thread.subject}</p>
-                  <p className="snippetCol">{thread.snippet ?? thread.priority.reasons[0] ?? "No preview"}</p>
-                  <span className="iconCol">{idx % 2 === 0 ? "⊃" : "✓"}</span>
-                  <span className="timeCol">{formatRelative(thread.lastMessageAt)}</span>
+                  <p className="rowSubject">{thread.subject}</p>
+                  <p className="rowSnippet">{thread.snippet ?? ""}</p>
+                  <span className="rowTime">{relTime(thread.lastMessageAt)}</span>
                 </li>
               ))}
             </ul>
-            {threadLoading ? <p className="sub listStatus">Loading thread...</p> : null}
-            {threadError ? <p className="error listStatus">{threadError}</p> : null}
           </>
         ) : (
-          <div className="threadReader">
-            <div className="threadReaderHeader">
-              <button className="backBtn" onClick={() => setIsThreadOpen(false)} aria-label="back to list">
-                ←
+          <div className="threadWorkspace">
+            <div className="threadHeader">
+              <button
+                className="ghost"
+                onClick={() => {
+                  closeOpenedThread();
+                }}
+              >
+                ← Back
               </button>
               <div>
-                <h2>{threadDetail?.subject ?? current?.subject ?? "Thread"}</h2>
-                <p>{threadDetail?.messages[0]?.sender ?? current?.participants[0] ?? "Unknown"}</p>
+                <h2>{threadDetail?.subject ?? "Thread"}</h2>
+                <p>{threadDetail?.snippet ?? "Conversation"}</p>
               </div>
-              <div className="readerActions">
-                <button onClick={() => void runIntent("Draft a concise reply to this thread.", "draft")}>Draft</button>
-                <button onClick={() => void runIntent("Summarize this thread and next steps.", "summarize")}>Summarize</button>
-                <button onClick={() => void runIntent("Delegate follow-up with due date.", "delegate")}>Delegate</button>
+              <div className="threadActions">
+                <button
+                  onClick={() => {
+                    setComposeOpen(true);
+                    setTimeout(() => replyRef.current?.focus(), 30);
+                  }}
+                >
+                  Reply (r/a)
+                </button>
+                <button onClick={() => void executeThreadAction("archive")}>Archive (e)</button>
+                <button onClick={() => void executeThreadAction("snooze")}>Snooze (h)</button>
+                <button onClick={() => void executeThreadAction("mark_unread")}>Unread</button>
+                <button onClick={() => void executeThreadAction("trash")}>Trash</button>
               </div>
             </div>
 
-            <div className="threadReaderBody">
-              <article className="readerMessageCard">
-                <p className="readerMeta">
-                  {threadDetail?.messages[0]?.sender ?? current?.participants[0] ?? "Unknown"}
-                  <span>{threadDetail?.messages[0]?.timestamp ? formatRelative(threadDetail.messages[0].timestamp) : ""}</span>
-                </p>
-                <p>{threadDetail?.messages[0]?.body ?? current?.snippet ?? "No message body available."}</p>
-              </article>
+            <div className="threadConversation" ref={threadConversationRef}>
+              {isLoadingThread ? <p className="subtle">Loading thread...</p> : null}
+              {threadError ? <p className="errorLine">{threadError}</p> : null}
+
+              {threadDetail?.messages.map((message) => (
+                <article className="messageCard" key={message.id}>
+                  <p className="messageMeta">
+                    <strong>{message.sender}</strong>
+                    <span>{relTime(message.timestamp)}</span>
+                  </p>
+                  <p className="messageBody">{message.body}</p>
+                </article>
+              ))}
             </div>
+
+            {composeOpen ? (
+              <div className="replyDock open">
+                <div className="replyHead">
+                  <strong>Draft to {composePayload.to[0] ?? "recipient"}</strong>
+                  <span>Cmd/Ctrl+Enter to send</span>
+                </div>
+                <div className="replyFields">
+                  <input
+                    value={composePayload.to.join(", ")}
+                    onChange={(event) =>
+                      setComposePayload((prev) => ({
+                        ...prev,
+                        to: parseEmails(event.target.value)
+                      }))
+                    }
+                    placeholder="To"
+                  />
+                  <input
+                    value={composePayload.subject}
+                    onChange={(event) => setComposePayload((prev) => ({ ...prev, subject: event.target.value }))}
+                    placeholder="Subject"
+                  />
+                  <textarea
+                    ref={replyRef}
+                    rows={5}
+                    value={composePayload.body}
+                    onChange={(event) => setComposePayload((prev) => ({ ...prev, body: event.target.value }))}
+                    placeholder="Write a reply..."
+                  />
+                </div>
+                <div className="replyActions">
+                  <button onClick={() => void saveDraft()} disabled={isWorking}>
+                    Save Draft
+                  </button>
+                  <button onClick={() => void sendCompose()} disabled={isWorking}>
+                    Send
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
+
+        {!openedThreadId && composeOpen ? (
+          <div className="replyDock floating open">
+            <div className="replyHead">
+              <strong>New Message</strong>
+              <span>Cmd/Ctrl+Enter to send</span>
+            </div>
+            <div className="replyFields">
+              <input
+                value={composePayload.to.join(", ")}
+                onChange={(event) =>
+                  setComposePayload((prev) => ({
+                    ...prev,
+                    to: parseEmails(event.target.value)
+                  }))
+                }
+                placeholder="To"
+              />
+              <input
+                value={composePayload.subject}
+                onChange={(event) => setComposePayload((prev) => ({ ...prev, subject: event.target.value }))}
+                placeholder="Subject"
+              />
+              <textarea
+                ref={replyRef}
+                rows={5}
+                value={composePayload.body}
+                onChange={(event) => setComposePayload((prev) => ({ ...prev, body: event.target.value }))}
+                placeholder="Write your message..."
+              />
+            </div>
+            <div className="replyActions">
+              <button onClick={() => void saveDraft()} disabled={isWorking}>
+                Save Draft
+              </button>
+              <button onClick={() => void sendCompose()} disabled={isWorking}>
+                Send
+              </button>
+              <button onClick={() => setComposeOpen(false)}>Close</button>
+            </div>
+          </div>
+        ) : null}
       </section>
 
-      <aside className="rightPane chatPane">
-        <div className="chatHeader">
-          <h3>
-            Chat: <span>{current?.participants[0] ?? "inbox"}</span>
-          </h3>
-          <p>{chatLoading ? "Streaming..." : "Ready"}</p>
+      <aside className="agentPane">
+        <div className="agentHead">
+          <h3>EA Agent</h3>
+          <span>Always-on via ⌘J</span>
         </div>
-
-        <div className="chatFeed">
-          {chatMessages.map((msg) => (
-            <div key={msg.id} className={`chatMsg ${msg.role}`}>
-              <p>{msg.text}</p>
-            </div>
-          ))}
+        <div className="agentFeed">
+          <div className="agentMsg user">Prioritize and summarize this inbox for me.</div>
+          <div className="agentMsg ai">Top 3 urgent: certificate revoked, legal demand letter, investor follow-up due today.</div>
+          <div className="agentMsg ai">I can draft responses, fetch context from Drive/Notion, and queue tasks.</div>
         </div>
-
-        <div className="chatShortcuts">
-          <button onClick={() => void runIntent("Summarize this thread and next steps.", "summarize")}>Summarize</button>
-          <button onClick={() => void runIntent("Draft a concise reply.", "draft")}>Draft Reply</button>
-          <button onClick={() => void runIntent("Pull context from connected docs.", "fetch_context")}>Pull Context</button>
-        </div>
-
-        <div className="chatComposer">
-          <textarea
-            ref={chatInputRef}
-            value={chatInput}
-            onChange={(event) => setChatInput(event.target.value)}
-            rows={3}
-            placeholder="Ask your EA to draft, triage, delegate, or fetch context..."
-          />
-          <div className="composerActions">
-            <button onClick={() => void sendChat()} disabled={chatLoading}>
-              {chatLoading ? "Running..." : "Send"}
-            </button>
-            <span className="sub">{shortcutHelp[0]} • {shortcutHelp[9]}</span>
+        <div className="agentComposer">
+          <textarea ref={agentRef} rows={5} placeholder="Ask your executive assistant..." />
+          <div className="agentActions">
+            <button>Run</button>
+            <button>Draft Reply</button>
+            <button>Create Task</button>
           </div>
         </div>
+        {status ? <p className="statusLine">{status}</p> : null}
       </aside>
-
-      {isCommandOpen ? (
-        <div className="commandBar" role="dialog" aria-modal="true">
-          <input autoFocus placeholder="Command: draft reply with Drive context" aria-label="command" />
-        </div>
-      ) : null}
     </main>
   );
 }

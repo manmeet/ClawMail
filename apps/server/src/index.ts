@@ -1,3 +1,4 @@
+import "dotenv/config";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -7,6 +8,10 @@ import { draftsRouter } from "./routes/drafts.js";
 import { tasksRouter } from "./routes/tasks.js";
 import { approvalsRouter } from "./routes/approvals.js";
 import { auditRouter } from "./routes/audit.js";
+import { authRouter } from "./routes/auth.js";
+import { syncRouter } from "./routes/sync.js";
+import { connectorRouter } from "./routes/connector.js";
+import { mailRouter } from "./routes/mail.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -22,6 +27,10 @@ app.use("/v1", draftsRouter);
 app.use("/v1", tasksRouter);
 app.use("/v1", approvalsRouter);
 app.use("/v1", auditRouter);
+app.use("/v1", authRouter);
+app.use("/v1", syncRouter);
+app.use("/v1", connectorRouter);
+app.use("/v1", mailRouter);
 
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
