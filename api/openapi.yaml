@@ -1,0 +1,381 @@
+openapi: 3.1.0
+info:
+  title: ClawMail API
+  version: 0.1.0
+  description: Executive inbox API with policy-gated OpenClaw orchestration.
+servers:
+  - url: http://localhost:8080
+paths:
+  /v1/inbox:
+    get:
+      summary: List threads for a mailbox view
+      parameters:
+        - in: query
+          name: view
+          schema:
+            type: string
+            enum: [inbox, priority, needs_reply, waiting, snoozed, delegated, done]
+      responses:
+        '200':
+          description: Thread list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Thread'
+  /v1/threads/{threadId}:
+    get:
+      summary: Get a thread with messages and triage
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      responses:
+        '200':
+          description: Thread details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThreadDetail'
+  /v1/threads/{threadId}/triage:
+    post:
+      summary: Recompute triage score and reasons
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      responses:
+        '200':
+          description: Updated triage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriorityScore'
+  /v1/threads/{threadId}/agent/actions:
+    post:
+      summary: Propose an agent action (policy-gated)
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentActionRequest'
+      responses:
+        '200':
+          description: Action decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentActionDecision'
+  /v1/drafts:
+    post:
+      summary: Generate a draft for a thread
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDraftRequest'
+      responses:
+        '201':
+          description: Draft created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+  /v1/drafts/{draftId}/approve-send:
+    post:
+      summary: Approve and send draft (requires approval token)
+      parameters:
+        - in: path
+          name: draftId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approvalToken]
+              properties:
+                approvalToken:
+                  type: string
+      responses:
+        '200':
+          description: Draft sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent:
+                    type: boolean
+  /v1/tasks:
+    get:
+      summary: List delegated tasks
+      responses:
+        '200':
+          description: Task list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Task'
+    post:
+      summary: Create delegated task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+      responses:
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+  /v1/approvals:
+    post:
+      summary: Create approval request for high-risk action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApprovalRequest'
+      responses:
+        '201':
+          description: Approval created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalRequest'
+  /v1/audit/events:
+    get:
+      summary: List audit events
+      parameters:
+        - in: query
+          name: threadId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audit trail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEvent'
+components:
+  parameters:
+    ThreadId:
+      in: path
+      name: threadId
+      required: true
+      schema:
+        type: string
+  schemas:
+    Thread:
+      type: object
+      required: [id, subject, participants, lastMessageAt, state]
+      properties:
+        id:
+          type: string
+        subject:
+          type: string
+        participants:
+          type: array
+          items:
+            type: string
+        snippet:
+          type: string
+        lastMessageAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum: [inbox, priority, needs_reply, waiting, snoozed, delegated, done]
+        priority:
+          $ref: '#/components/schemas/PriorityScore'
+    Message:
+      type: object
+      required: [id, sender, body, timestamp]
+      properties:
+        id:
+          type: string
+        sender:
+          type: string
+        body:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+    PriorityScore:
+      type: object
+      required: [score, level, reasons]
+      properties:
+        score:
+          type: number
+        level:
+          type: string
+          enum: [P1, P2, P3]
+        reasons:
+          type: array
+          items:
+            type: string
+    ThreadDetail:
+      allOf:
+        - $ref: '#/components/schemas/Thread'
+        - type: object
+          properties:
+            messages:
+              type: array
+              items:
+                $ref: '#/components/schemas/Message'
+    AgentActionRequest:
+      type: object
+      required: [intent, input]
+      properties:
+        intent:
+          type: string
+          enum: [summarize, draft, explain_priority, delegate, fetch_context, send]
+        input:
+          type: object
+          additionalProperties: true
+    AgentActionDecision:
+      type: object
+      required: [actionId, status, reason]
+      properties:
+        actionId:
+          type: string
+        status:
+          type: string
+          enum: [approved, denied, approval_required]
+        reason:
+          type: string
+        proposedToolCalls:
+          type: array
+          items:
+            type: object
+            properties:
+              tool:
+                type: string
+              args:
+                type: object
+                additionalProperties: true
+        approval:
+          $ref: '#/components/schemas/ApprovalRequest'
+    CreateDraftRequest:
+      type: object
+      required: [threadId, tone]
+      properties:
+        threadId:
+          type: string
+        tone:
+          type: string
+          enum: [concise, friendly, firm]
+        constraints:
+          type: string
+    Draft:
+      type: object
+      required: [id, threadId, content, status]
+      properties:
+        id:
+          type: string
+        threadId:
+          type: string
+        content:
+          type: string
+        status:
+          type: string
+          enum: [drafted, approved, sent]
+    CreateTaskRequest:
+      type: object
+      required: [threadId, title]
+      properties:
+        threadId:
+          type: string
+        title:
+          type: string
+        dueAt:
+          type: string
+          format: date-time
+    Task:
+      type: object
+      required: [id, sourceThreadId, title, status]
+      properties:
+        id:
+          type: string
+        sourceThreadId:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [queued, in_progress, needs_approval, done]
+        dueAt:
+          type: string
+          format: date-time
+    CreateApprovalRequest:
+      type: object
+      required: [actionType, preview]
+      properties:
+        actionType:
+          type: string
+          enum: [email.send, file.share, permission.change]
+        preview:
+          type: object
+          additionalProperties: true
+        citations:
+          type: array
+          items:
+            type: string
+    ApprovalRequest:
+      type: object
+      required: [id, actionType, status, token]
+      properties:
+        id:
+          type: string
+        actionType:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, expired, rejected]
+        token:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+    AuditEvent:
+      type: object
+      required: [id, type, timestamp]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [agent.action.proposed, policy.decision, approval.created, draft.sent, tool.executed]
+        threadId:
+          type: string
+        actor:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
