@@ -23,8 +23,6 @@ const folders: Array<{ id: MailFolder; label: string; shortcut: string }> = [
   { id: "trash", label: "Trash", shortcut: "#" }
 ];
 
-const focusTabs = ["Investors", "FDA", "Signature", "VPM", "PandaDoc", "Calendar", "Other"];
-
 function relTime(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.max(1, Math.floor(diff / 60000));
@@ -69,12 +67,16 @@ export function InboxShell() {
   const [status, setStatus] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const [isCommandOpen, setIsCommandOpen] = useState(false);
+  const [accountTabs, setAccountTabs] = useState<string[]>([]);
+  const [activeAccount, setActiveAccount] = useState(0);
+  const [isTabletAgentOpen, setIsTabletAgentOpen] = useState(false);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
   const replyRef = useRef<HTMLTextAreaElement | null>(null);
   const commandRef = useRef<HTMLInputElement | null>(null);
   const agentRef = useRef<HTMLTextAreaElement | null>(null);
   const threadConversationRef = useRef<HTMLDivElement | null>(null);
+  const openThreadReqRef = useRef(0);
 
   const selectedThread = useMemo(() => threads[selectedIndex] ?? null, [threads, selectedIndex]);
 
@@ -98,6 +100,9 @@ export function InboxShell() {
       const gmail = connectors.items.find((item) => item.id === "gmail");
       setGmailConnected(Boolean(gmail?.connected));
       setGmailAccount(gmail?.account ?? null);
+      if (gmail?.connected && gmail.account) {
+        setAccountTabs((prev) => (prev.includes(gmail.account as string) ? prev : [...prev, gmail.account as string]));
+      }
     } catch {
       setGmailConnected(false);
       setGmailAccount(null);
@@ -125,11 +130,13 @@ export function InboxShell() {
   }, []);
 
   const openThread = useCallback(async (threadId: string, options?: { openComposer?: boolean }) => {
+    const reqId = ++openThreadReqRef.current;
     setOpenedThreadId(threadId);
     setThreadError(null);
     setIsLoadingThread(true);
     try {
       const result = await getMailThread(threadId);
+      if (reqId !== openThreadReqRef.current) return;
       setThreadDetail(result.item);
       setThreads((prev) => prev.map((thread) => (thread.id === threadId ? { ...thread, unread: false } : thread)));
 
@@ -148,9 +155,12 @@ export function InboxShell() {
       void applyMailThreadAction(threadId, "mark_read").catch(() => {});
       window.setTimeout(scrollThreadToBottom, 20);
     } catch (error) {
+      if (reqId !== openThreadReqRef.current) return;
       setThreadError(error instanceof Error ? error.message : "Failed to load thread");
     } finally {
-      setIsLoadingThread(false);
+      if (reqId === openThreadReqRef.current) {
+        setIsLoadingThread(false);
+      }
     }
   }, [scrollThreadToBottom]);
 
@@ -203,6 +213,9 @@ export function InboxShell() {
         }
         if (action === "archive" || action === "trash" || action === "snooze") {
           closeOpenedThread();
+          return;
+        }
+        if (action === "mark_read" || action === "mark_unread") {
           return;
         }
         await refreshThreads();
@@ -360,6 +373,10 @@ export function InboxShell() {
           closeOpenedThread();
           return;
         }
+        if (isTabletAgentOpen) {
+          setIsTabletAgentOpen(false);
+          return;
+        }
       }
 
       if (isTypingTarget(event.target) && !(ctrlOrMeta && event.key.toLowerCase() === "enter")) return;
@@ -442,6 +459,7 @@ export function InboxShell() {
     closeOpenedThread,
     composeOpen,
     isCommandOpen,
+    isTabletAgentOpen,
     executeThreadAction,
     isSidebarOpen,
     openNewCompose,
@@ -456,14 +474,45 @@ export function InboxShell() {
     <main className="mailApp">
       <header className="mailTopBar">
         <div className="topTabs">
-          <button className="topTab active">Important (615) - {gmailAccount ?? "you@gmail.com"}</button>
-          <button className="topTab">Important (332) - personal@gmail.com</button>
-          <button className="topTab">Inbox - ops@gmail.com</button>
+          {(accountTabs.length > 0 ? accountTabs : [gmailAccount ?? "No account"]).map((account, index) => (
+            <button key={account} className={index === activeAccount ? "topTab active" : "topTab"} onClick={() => setActiveAccount(index)}>
+              {account}
+            </button>
+          ))}
+          <button
+            className="topTab addTab"
+            aria-label="add account"
+            onClick={async () => {
+              const value = window.prompt("Add mailbox instance email (or leave empty to connect Gmail):", "");
+              if (value && value.includes("@")) {
+                setAccountTabs((prev) => {
+                  if (prev.includes(value)) {
+                    setActiveAccount(prev.indexOf(value));
+                    return prev;
+                  }
+                  const next = [...prev, value];
+                  setActiveAccount(next.length - 1);
+                  return next;
+                });
+                return;
+              }
+              await connectGmail();
+              await refreshConnector();
+            }}
+          >
+            +
+          </button>
         </div>
         <div className="topControls">
-          <button onClick={() => void connectGmail()}>Connect Gmail</button>
-          <button onClick={() => void syncInbox()} disabled={isWorking}>
+          <button className="chromeButton" onClick={() => void connectGmail()}>
+            Connect Gmail
+          </button>
+          <button className="chromeButton syncButton" onClick={() => void syncInbox()} disabled={isWorking}>
+            <span className="syncOrb" />
             Sync
+          </button>
+          <button className="chromeButton tabletOnly" onClick={() => setIsTabletAgentOpen((v) => !v)}>
+            Claw Agent
           </button>
           <span className="statusDot">{gmailConnected ? `Connected: ${gmailAccount ?? "gmail"}` : "Gmail not connected"}</span>
         </div>
@@ -471,7 +520,11 @@ export function InboxShell() {
 
       <aside className="rail">
         <button className="railBrand" aria-label="assistant">
-          ai
+          <svg className="clawGlyph" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <path d="M6 20L14 6L22 20" stroke="currentColor" strokeWidth="1.6" />
+            <path d="M9.5 16.8H18.5" stroke="currentColor" strokeWidth="1.6" />
+            <circle cx="14" cy="21.2" r="1.6" fill="currentColor" />
+          </svg>
         </button>
         <button className="railMain" onClick={() => setIsSidebarOpen((v) => !v)} aria-label="folders">
           ☰
@@ -562,8 +615,16 @@ export function InboxShell() {
             </div>
 
             <div className="focusTabs">
-              {focusTabs.map((tab) => (
-                <button key={tab}>{tab}</button>
+              {[
+                { id: "inbox", label: "Inbox" },
+                { id: "important", label: "Important" },
+                { id: "sent", label: "Sent" },
+                { id: "drafts", label: "Drafts" },
+                { id: "all", label: "Folders" }
+              ].map((tab) => (
+                <button key={tab.id} onClick={() => setFolder(tab.id as MailFolder)}>
+                  {tab.label}
+                </button>
               ))}
             </div>
 
@@ -595,6 +656,7 @@ export function InboxShell() {
                   key={thread.id}
                   data-thread-id={thread.id}
                   className={idx === selectedIndex ? "threadRow active" : "threadRow"}
+                  style={{ animationDelay: `${Math.min(idx, 14) * 18}ms` }}
                   onClick={() => {
                     setSelectedIndex(idx);
                     void openThread(thread.id);
@@ -743,9 +805,10 @@ export function InboxShell() {
         ) : null}
       </section>
 
-      <aside className="agentPane">
+      {isTabletAgentOpen ? <button className="agentTabletScrim" onClick={() => setIsTabletAgentOpen(false)} aria-label="close agent" /> : null}
+      <aside className={isTabletAgentOpen ? "agentPane tabletOpen" : "agentPane"}>
         <div className="agentHead">
-          <h3>EA Agent</h3>
+          <h3>Claw Agent</h3>
           <span>Always-on via ⌘J</span>
         </div>
         <div className="agentFeed">

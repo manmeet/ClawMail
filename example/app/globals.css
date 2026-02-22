@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-base: var(--bg-base);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-surface-hover: var(--bg-surface-hover);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-accent: var(--accent);
+  --color-border-subtle: var(--border-subtle);
+  --font-heading: var(--font-heading);
+  --font-body: var(--font-body);
+  --radius-base: var(--radius-base);
+}
+
+@layer base {
+  :root {
+    --bg-base: #050505;
+    --bg-surface: #111111;
+    --bg-surface-hover: #1A1A1A;
+    --text-primary: #F5F2ED;
+    --text-secondary: #A09D98;
+    --accent: #D4AF37;
+    --border-subtle: rgba(245, 242, 237, 0.15);
+    --font-heading: var(--font-cormorant);
+    --font-body: var(--font-inter);
+    --radius-base: 0px;
+    --shadow-base: none;
+  }
+
+  [data-theme="technical"] {
+    --bg-base: #0A0A0A;
+    --bg-surface: #151619;
+    --bg-surface-hover: #1E1F23;
+    --text-primary: #FFFFFF;
+    --text-secondary: #8E9299;
+    --accent: #00FF00;
+    --border-subtle: rgba(255, 255, 255, 0.15);
+    --font-heading: var(--font-jetbrains);
+    --font-body: var(--font-inter);
+    --radius-base: 4px;
+    --shadow-base: 0 4px 20px rgba(0,0,0,0.5);
+  }
+
+  [data-theme="atmospheric"] {
+    --bg-base: #0A0502;
+    --bg-surface: rgba(255, 255, 255, 0.03);
+    --bg-surface-hover: rgba(255, 255, 255, 0.08);
+    --text-primary: #E0D8D0;
+    --text-secondary: rgba(224, 216, 208, 0.6);
+    --accent: #FF4E00;
+    --border-subtle: rgba(255, 200, 150, 0.1);
+    --font-heading: var(--font-georgia);
+    --font-body: var(--font-inter);
+    --radius-base: 24px;
+    --shadow-base: 0 10px 40px rgba(0,0,0,0.3);
+  }
+
+  body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-body);
+  }
+}
+
+/* Atmospheric specific styles */
+[data-theme="atmospheric"] .glass-panel {
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+[data-theme="atmospheric"] .atmosphere-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background: 
+    radial-gradient(circle at 50% 30%, rgba(255, 78, 0, 0.05) 0%, transparent 60%),
+    radial-gradient(circle at 10% 80%, rgba(255, 78, 0, 0.03) 0%, transparent 50%);
+  filter: blur(60px);
+  pointer-events: none;
+}
+
+/* Technical specific styles */
+[data-theme="technical"] .dashed-border {
+  border: 1px dashed var(--border-subtle);
+}
+[data-theme="technical"] .tech-glow {
+  box-shadow: 0 0 10px rgba(0, 255, 0, 0.2);
+}

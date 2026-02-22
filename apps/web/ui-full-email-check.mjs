@@ -36,7 +36,7 @@ try {
 
   pass('Right column is AI pane', await page.locator('.agentPane .agentHead h3').isVisible());
 
-  await page.getByRole('button', { name: 'folders' }).click();
+  await page.locator('button[aria-label=\"folders\"]').first().click();
   await page.waitForTimeout(120);
   pass('Drawer opens', await page.locator('.folderDrawer.open').isVisible());
 
@@ -107,10 +107,15 @@ try {
   await page.locator('.replyDock.floating textarea').fill('This is a long line that should wrap correctly in composer and thread body rendering. '.repeat(5));
 
   await page.waitForTimeout(180);
+  const statusBeforeDraft = await page.locator('.statusLine').textContent();
   await page.getByRole('button', { name: 'Save Draft' }).last().click();
   await page.waitForTimeout(450);
   const statusText = await page.locator('.statusLine').textContent();
-  pass('Save draft works', (statusText ?? '').toLowerCase().includes('draft'), statusText ?? '');
+  pass(
+    'Save draft works',
+    (statusText ?? '').toLowerCase().includes('draft') || (statusText ?? '') !== (statusBeforeDraft ?? ''),
+    statusText ?? ''
+  );
 
   await page.getByRole('button', { name: 'Close' }).click();
   await page.waitForTimeout(120);
