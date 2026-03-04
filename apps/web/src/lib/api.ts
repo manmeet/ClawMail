@@ -1,4 +1,6 @@
 import type {
+  AgentChatRequest,
+  AgentChatResponse,
   AgentActionDecision,
   AgentActionIntent,
   MailComposePayload,
@@ -139,4 +141,14 @@ export async function applyMailThreadAction(
     body: JSON.stringify({ action })
   });
   return parseResponse<{ source: "gmail" | "mock"; item: unknown }>(response);
+}
+
+export async function chatWithAgent(payload: AgentChatRequest) {
+  const response = await fetch(`${API_BASE_URL}/v1/agent/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  return parseResponse<AgentChatResponse>(response);
 }

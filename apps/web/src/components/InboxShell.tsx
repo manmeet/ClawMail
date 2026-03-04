@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyMailThreadAction,
+  chatWithAgent,
   createMailDraft,
   getConnectors,
   getMailThread,
@@ -38,6 +39,113 @@ function isTypingTarget(target: EventTarget | null) {
   return tag === "input" || tag === "textarea" || target.isContentEditable;
 }
 
+type AgentPaneMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  createdAt: string;
+  threadAttached?: boolean;
+  threadAttachReason?: string;
+  draftId?: string;
+};
+
+type ThreadDraftCacheEntry = {
+  draftId: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+};
+
+function nextMessageId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeSessionToken(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9._-]/g, "_");
+}
+
+function buildAgentSessionKey(threadId: string | undefined, mailboxAccount: string | undefined) {
+  const accountKey = normalizeSessionToken(mailboxAccount ?? "default");
+  if (!threadId) return `clawmail:${accountKey}:inbox`;
+  return `clawmail:${accountKey}:thread:${threadId}`;
+}
+
+function buildInitialSessionMessages(threadId?: string): AgentPaneMessage[] {
+  const now = new Date().toISOString();
+  if (!threadId) {
+    return [
+      {
+        id: nextMessageId(),
+        role: "system",
+        text: "Inbox session active. Open a thread to start a dedicated thread session.",
+        createdAt: now,
+        threadAttached: false,
+        threadAttachReason: "No open thread selected."
+      }
+    ];
+  }
+
+  return [
+    {
+      id: nextMessageId(),
+      role: "system",
+      text: "New thread session active. Past chats from other threads are not included here.",
+      createdAt: now,
+      threadAttached: false,
+      threadAttachReason: "Thread context auto-attaches for thread-related requests."
+    }
+  ];
+}
+
+function isDraftIntentMessage(value: string) {
+  const text = value.toLowerCase();
+  return (
+    /\bdraft\b/.test(text) ||
+    /\bcompose\b/.test(text) ||
+    /\bwrite\b.*\b(reply|response|email)\b/.test(text) ||
+    /\bhelp me\b.*\b(reply|respond)\b/.test(text) ||
+    /\brespond\b/.test(text)
+  );
+}
+
+function isDraftRefinementMessage(value: string) {
+  const text = value.toLowerCase().trim();
+  return (
+    /\bmake it\b/.test(text) ||
+    /\bshorter\b/.test(text) ||
+    /\blonger\b/.test(text) ||
+    /\brewrite\b/.test(text) ||
+    /\brefine\b/.test(text) ||
+    /\bpolish\b/.test(text) ||
+    /\bmore\b/.test(text) ||
+    /\bless\b/.test(text) ||
+    /\bchange the tone\b/.test(text)
+  );
+}
+
+function extractDraftBodyFromAssistant(raw: string) {
+  const cleaned = raw
+    .replace(/```[a-z]*\n?/gi, "")
+    .replace(/```/g, "")
+    .replace(/\r/g, "")
+    .trim();
+
+  const lines = cleaned.split("\n").map((line) => line.trimEnd());
+  const filtered = lines.filter((line) => {
+    const compact = line.trim().toLowerCase();
+    const normalized = compact.replace(/^[>*\-\s_`#]+/, "").replace(/[*_`]+/g, "");
+    if (!compact) return true;
+    if (/^(subject|to|cc|bcc)\s*:/i.test(normalized)) return false;
+    if (/^(sure|absolutely|certainly|here(?:'|’)s|below is|draft reply|draft email|response draft)/i.test(normalized)) return false;
+    if (/^(let me know|if you want|if you'd like|i can also)/i.test(normalized)) return false;
+    return true;
+  });
+
+  return filtered.join("\n").trim();
+}
+
 export function InboxShell() {
   const [folder, setFolder] = useState<MailFolder>("important");
   const [query, setQuery] = useState("");
@@ -70,11 +178,16 @@ export function InboxShell() {
   const [accountTabs, setAccountTabs] = useState<string[]>([]);
   const [activeAccount, setActiveAccount] = useState(0);
   const [isTabletAgentOpen, setIsTabletAgentOpen] = useState(false);
+  const [agentInput, setAgentInput] = useState("");
+  const [isAgentWorking, setIsAgentWorking] = useState(false);
+  const [agentSessionMessages, setAgentSessionMessages] = useState<Record<string, AgentPaneMessage[]>>({});
+  const [threadDraftCache, setThreadDraftCache] = useState<Record<string, ThreadDraftCacheEntry>>({});
 
   const searchRef = useRef<HTMLInputElement | null>(null);
   const replyRef = useRef<HTMLTextAreaElement | null>(null);
   const commandRef = useRef<HTMLInputElement | null>(null);
   const agentRef = useRef<HTMLTextAreaElement | null>(null);
+  const agentFeedRef = useRef<HTMLDivElement | null>(null);
   const threadConversationRef = useRef<HTMLDivElement | null>(null);
   const openThreadReqRef = useRef(0);
 
@@ -142,16 +255,17 @@ export function InboxShell() {
 
       const sender = result.item.messages?.[0]?.sender ?? result.item.participants?.[0] ?? "";
       const nextSubject = result.item.subject.toLowerCase().startsWith("re:") ? result.item.subject : `Re: ${result.item.subject}`;
+      const cachedDraft = threadDraftCache[threadId];
       setComposePayload({
         threadId: result.item.id,
-        to: sender ? [sender] : [],
-        cc: [],
-        bcc: [],
-        subject: nextSubject,
-        body: ""
+        to: cachedDraft?.to ?? (sender ? [sender] : []),
+        cc: cachedDraft?.cc ?? [],
+        bcc: cachedDraft?.bcc ?? [],
+        subject: cachedDraft?.subject ?? nextSubject,
+        body: cachedDraft?.body ?? ""
       });
-      setComposeOpen(Boolean(options?.openComposer));
-      setComposeDraftId(null);
+      setComposeOpen(Boolean(options?.openComposer || cachedDraft));
+      setComposeDraftId(cachedDraft?.draftId ?? null);
       void applyMailThreadAction(threadId, "mark_read").catch(() => {});
       window.setTimeout(scrollThreadToBottom, 20);
     } catch (error) {
@@ -162,7 +276,7 @@ export function InboxShell() {
         setIsLoadingThread(false);
       }
     }
-  }, [scrollThreadToBottom]);
+  }, [scrollThreadToBottom, threadDraftCache]);
 
   const openNewCompose = useCallback(() => {
     setOpenedThreadId(null);
@@ -191,6 +305,32 @@ export function InboxShell() {
     setComposePayload({ to: [], cc: [], bcc: [], subject: "", body: "" });
     setComposeDraftId(null);
   }, []);
+
+  const openReplyComposer = useCallback(
+    (replyAll = false) => {
+      if (!threadDetail || !openedThreadId) return;
+      const sender = threadDetail.messages?.[0]?.sender ?? threadDetail.participants?.[0] ?? "";
+      const participantEmails = threadDetail.participants
+        .map((item) => item.trim())
+        .filter((item) => item.includes("@"));
+      const uniqueEmails = Array.from(new Set(participantEmails));
+      const accountLower = (gmailAccount ?? "").toLowerCase();
+      const filteredAll = uniqueEmails.filter((email) => email.toLowerCase() !== accountLower);
+
+      const nextTo = replyAll ? (filteredAll.length > 0 ? filteredAll : sender ? [sender] : []) : sender ? [sender] : [];
+      const nextSubject = threadDetail.subject.toLowerCase().startsWith("re:") ? threadDetail.subject : `Re: ${threadDetail.subject}`;
+
+      setComposePayload((prev) => ({
+        ...prev,
+        threadId: openedThreadId,
+        to: nextTo,
+        subject: prev.subject || nextSubject
+      }));
+      setComposeOpen(true);
+      setTimeout(() => replyRef.current?.focus(), 30);
+    },
+    [gmailAccount, openedThreadId, threadDetail]
+  );
 
   const executeThreadAction = useCallback(
     async (action: "archive" | "mark_read" | "mark_unread" | "snooze" | "trash") => {
@@ -237,6 +377,19 @@ export function InboxShell() {
     try {
       const draft = await createMailDraft(composePayload);
       setComposeDraftId(draft.item.id ?? null);
+      if (composePayload.threadId) {
+        setThreadDraftCache((prev) => ({
+          ...prev,
+          [composePayload.threadId as string]: {
+            draftId: draft.item.id ?? null,
+            to: composePayload.to,
+            cc: composePayload.cc ?? [],
+            bcc: composePayload.bcc ?? [],
+            subject: composePayload.subject,
+            body: composePayload.body
+          }
+        }));
+      }
       setStatus("Draft saved");
       await refreshThreads();
     } catch (error) {
@@ -265,6 +418,11 @@ export function InboxShell() {
 
       const isReplyInOpenThread = Boolean(openedThreadId && threadId && openedThreadId === threadId);
       if (isReplyInOpenThread && threadId) {
+        setThreadDraftCache((prev) => {
+          const next = { ...prev };
+          delete next[threadId];
+          return next;
+        });
         setThreadDetail((prev) => {
           if (!prev || prev.id !== threadId) return prev;
           return {
@@ -310,29 +468,218 @@ export function InboxShell() {
     }
   }, [closeOpenedThread, composeDraftId, composePayload, gmailAccount, openedThreadId, refreshThreads, scrollThreadToBottom]);
 
-  const connectGmail = useCallback(async () => {
-    try {
-      const { authUrl } = await startGoogleAuth();
-      window.open(authUrl, "_blank", "noopener,noreferrer");
-      setStatus("Opened Google OAuth consent");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to start OAuth");
-    }
-  }, []);
-
   const syncInbox = useCallback(async () => {
     setIsWorking(true);
     try {
+      if (!gmailConnected) {
+        const { authUrl } = await startGoogleAuth();
+        window.open(authUrl, "_blank", "noopener,noreferrer");
+        setStatus("Reconnect started. Complete OAuth, then press Sync again.");
+        return;
+      }
+
       const result = await syncGmail(50);
       setStatus(`Synced ${result.importedThreads} threads`);
       await refreshThreads();
       await refreshConnector();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Sync failed");
+      try {
+        const { authUrl } = await startGoogleAuth();
+        window.open(authUrl, "_blank", "noopener,noreferrer");
+        setStatus("Sync failed; started Gmail re-auth. Complete OAuth and retry Sync.");
+      } catch {
+        setStatus(error instanceof Error ? error.message : "Sync failed");
+      }
     } finally {
       setIsWorking(false);
     }
-  }, [refreshConnector, refreshThreads]);
+  }, [gmailConnected, refreshConnector, refreshThreads]);
+
+  const activeMailboxAccount = useMemo(
+    () => gmailAccount ?? accountTabs[activeAccount] ?? undefined,
+    [accountTabs, activeAccount, gmailAccount]
+  );
+  const activeChatThreadId = openedThreadId ?? undefined;
+  const activeAgentSessionKey = useMemo(
+    () => buildAgentSessionKey(activeChatThreadId, activeMailboxAccount),
+    [activeChatThreadId, activeMailboxAccount]
+  );
+  const agentMessages = useMemo(
+    () => agentSessionMessages[activeAgentSessionKey] ?? [],
+    [activeAgentSessionKey, agentSessionMessages]
+  );
+
+  useEffect(() => {
+    setAgentSessionMessages((prev) => {
+      if (prev[activeAgentSessionKey]) return prev;
+      return {
+        ...prev,
+        [activeAgentSessionKey]: buildInitialSessionMessages(activeChatThreadId)
+      };
+    });
+  }, [activeAgentSessionKey, activeChatThreadId]);
+
+  useEffect(() => {
+    const feed = agentFeedRef.current;
+    if (!feed) return;
+    feed.scrollTop = feed.scrollHeight;
+  }, [agentMessages, isAgentWorking]);
+
+  const appendToActiveSession = useCallback(
+    (message: AgentPaneMessage) => {
+      setAgentSessionMessages((prev) => {
+        const current = prev[activeAgentSessionKey] ?? buildInitialSessionMessages(activeChatThreadId);
+        return {
+          ...prev,
+          [activeAgentSessionKey]: [...current, message]
+        };
+      });
+    },
+    [activeAgentSessionKey, activeChatThreadId]
+  );
+
+  const saveAgentDraftToMainPane = useCallback(
+    async (draftBody: string) => {
+      if (!openedThreadId || !threadDetail) return;
+      const draftOnlyBody = extractDraftBodyFromAssistant(draftBody);
+      if (!draftOnlyBody) {
+        setStatus("Agent returned empty draft body");
+        return;
+      }
+
+      const to = composePayload.to.length > 0 ? composePayload.to : threadDetail.participants.slice(0, 1);
+      const subject =
+        composePayload.subject ||
+        (threadDetail.subject.toLowerCase().startsWith("re:") ? threadDetail.subject : `Re: ${threadDetail.subject}`);
+
+      if (to.length === 0) {
+        setStatus("Could not infer recipient for draft");
+        return;
+      }
+
+      try {
+        const created = await createMailDraft({
+          threadId: openedThreadId,
+          to,
+          cc: composePayload.cc ?? [],
+          bcc: composePayload.bcc ?? [],
+          subject,
+          body: draftOnlyBody
+        });
+
+        setComposeDraftId(created.item.id ?? null);
+        setComposeOpen(true);
+        setComposePayload((prev) => ({
+          ...prev,
+          threadId: openedThreadId,
+          to,
+          subject,
+          body: draftOnlyBody
+        }));
+        setThreadDraftCache((prev) => ({
+          ...prev,
+          [openedThreadId]: {
+            draftId: created.item.id ?? null,
+            to,
+            cc: composePayload.cc ?? [],
+            bcc: composePayload.bcc ?? [],
+            subject,
+            body: draftOnlyBody
+          }
+        }));
+        setStatus("Draft inserted in main reply pane. Review and press Send.");
+        appendToActiveSession({
+          id: nextMessageId(),
+          role: "system",
+          text: `Draft inserted for this thread (id: ${created.item.id ?? "local"}).`,
+          createdAt: new Date().toISOString(),
+          draftId: created.item.id ?? undefined
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to save draft";
+        setStatus(message);
+        appendToActiveSession({
+          id: nextMessageId(),
+          role: "system",
+          text: `Draft save failed: ${message}`,
+          createdAt: new Date().toISOString()
+        });
+      }
+    },
+    [appendToActiveSession, composePayload.bcc, composePayload.cc, composePayload.subject, composePayload.to, openedThreadId, threadDetail]
+  );
+
+  const runAgentChatTurn = useCallback(
+    async (message: string, options?: { forceThreadAccess?: boolean; autoInsertDraft?: boolean }) => {
+      const trimmed = message.trim();
+      if (!trimmed) return null;
+
+      const threadId = activeChatThreadId;
+      const createdAt = new Date().toISOString();
+      const threadSessionHasAttachedContext = agentMessages.some((item) => item.threadAttached);
+      const allowThreadAccess = Boolean(
+        options?.forceThreadAccess === true ||
+          (threadId && (threadSessionHasAttachedContext || isDraftRefinementMessage(trimmed)))
+      );
+
+      appendToActiveSession({
+        id: nextMessageId(),
+        role: "user",
+        text: trimmed,
+        createdAt
+      });
+
+      setAgentInput("");
+      setIsAgentWorking(true);
+
+      try {
+        const result = await chatWithAgent({
+          message: trimmed,
+          threadId,
+          mailboxAccount: activeMailboxAccount,
+          allowThreadAccess,
+          autoThreadDetect: true
+        });
+
+        appendToActiveSession({
+          id: nextMessageId(),
+          role: "assistant",
+          text: result.assistantMessage,
+          createdAt: new Date().toISOString(),
+          threadAttached: result.threadAttached,
+          threadAttachReason: result.threadAttachReason
+        });
+
+        if (options?.autoInsertDraft && openedThreadId && result.assistantMessage.trim()) {
+          await saveAgentDraftToMainPane(result.assistantMessage.trim());
+        }
+
+        return result;
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : "Agent request failed";
+        appendToActiveSession({
+          id: nextMessageId(),
+          role: "system",
+          text: `Agent error: ${messageText}`,
+          createdAt: new Date().toISOString(),
+          threadAttached: false,
+          threadAttachReason: "No thread context attached."
+        });
+        return null;
+      } finally {
+        setIsAgentWorking(false);
+      }
+    },
+    [activeChatThreadId, activeMailboxAccount, agentMessages, appendToActiveSession, openedThreadId, saveAgentDraftToMainPane]
+  );
+
+  const runAgentFromComposer = useCallback(async () => {
+    const prompt = agentInput.trim();
+    if (!prompt) return;
+    await runAgentChatTurn(prompt, {
+      autoInsertDraft: Boolean(openedThreadId && isDraftIntentMessage(prompt))
+    });
+  }, [agentInput, openedThreadId, runAgentChatTurn]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -340,6 +687,9 @@ export function InboxShell() {
       if (ctrlOrMeta && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setIsCommandOpen(true);
+        return;
+      }
+      if (ctrlOrMeta && event.key.toLowerCase() !== "enter") {
         return;
       }
 
@@ -448,7 +798,13 @@ export function InboxShell() {
 
       if (ctrlOrMeta && event.key.toLowerCase() === "enter") {
         event.preventDefault();
-        if (composeOpen) void sendCompose();
+        if (composeOpen) {
+          void sendCompose();
+          return;
+        }
+        if (document.activeElement === agentRef.current) {
+          void runAgentFromComposer();
+        }
       }
 
     };
@@ -465,6 +821,7 @@ export function InboxShell() {
     openNewCompose,
     openThread,
     openedThreadId,
+    runAgentFromComposer,
     selectedThread?.id,
     sendCompose,
     threads.length
@@ -482,8 +839,8 @@ export function InboxShell() {
           <button
             className="topTab addTab"
             aria-label="add account"
-            onClick={async () => {
-              const value = window.prompt("Add mailbox instance email (or leave empty to connect Gmail):", "");
+            onClick={() => {
+              const value = window.prompt("Add another mailbox tab (email address):", "");
               if (value && value.includes("@")) {
                 setAccountTabs((prev) => {
                   if (prev.includes(value)) {
@@ -494,19 +851,15 @@ export function InboxShell() {
                   setActiveAccount(next.length - 1);
                   return next;
                 });
-                return;
+              } else if (value) {
+                setStatus("Enter a valid email address");
               }
-              await connectGmail();
-              await refreshConnector();
             }}
           >
             +
           </button>
         </div>
         <div className="topControls">
-          <button className="chromeButton" onClick={() => void connectGmail()}>
-            Connect Gmail
-          </button>
           <button className="chromeButton syncButton" onClick={() => void syncInbox()} disabled={isWorking}>
             <span className="syncOrb" />
             Sync
@@ -676,31 +1029,66 @@ export function InboxShell() {
         ) : (
           <div className="threadWorkspace">
             <div className="threadHeader">
-              <button
-                className="ghost"
-                onClick={() => {
-                  closeOpenedThread();
-                }}
-              >
-                ← Back
-              </button>
-              <div>
-                <h2>{threadDetail?.subject ?? "Thread"}</h2>
-                <p>{threadDetail?.snippet ?? "Conversation"}</p>
+              <div className="threadHeaderMain">
+                <button
+                  className="threadBack"
+                  onClick={() => {
+                    closeOpenedThread();
+                  }}
+                >
+                  Back
+                </button>
+                <div>
+                  <h2>{threadDetail?.subject ?? "Thread"}</h2>
+                  <p>{threadDetail?.snippet ?? "Conversation"}</p>
+                </div>
               </div>
               <div className="threadActions">
                 <button
-                  onClick={() => {
-                    setComposeOpen(true);
-                    setTimeout(() => replyRef.current?.focus(), 30);
-                  }}
+                  className="threadActionIcon"
+                  aria-label="reply"
+                  title="Reply"
+                  onClick={() => openReplyComposer(false)}
                 >
-                  Reply (r/a)
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M9 5L4 10L9 15" />
+                    <path d="M5 10H12.5C15.3 10 17 11.7 17 14.5V15" />
+                  </svg>
                 </button>
-                <button onClick={() => void executeThreadAction("archive")}>Archive (e)</button>
-                <button onClick={() => void executeThreadAction("snooze")}>Snooze (h)</button>
-                <button onClick={() => void executeThreadAction("mark_unread")}>Unread</button>
-                <button onClick={() => void executeThreadAction("trash")}>Trash</button>
+                <button
+                  className="threadActionIcon"
+                  aria-label="reply all"
+                  title="Reply all"
+                  onClick={() => openReplyComposer(true)}
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M7 6L3 10L7 14" />
+                    <path d="M11 6L7 10L11 14" />
+                    <path d="M7.5 10H13C15.5 10 17 11.5 17 14V15" />
+                  </svg>
+                </button>
+                <button className="threadActionIcon" aria-label="archive" title="Archive" onClick={() => void executeThreadAction("archive")}>
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <rect x="3" y="4" width="14" height="4" rx="1.2" />
+                    <path d="M4.5 8V15.5H15.5V8" />
+                    <path d="M8 11H12" />
+                  </svg>
+                </button>
+                <button className="threadActionIcon" aria-label="mark unread" title="Mark unread" onClick={() => void executeThreadAction("mark_unread")}>
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <rect x="3" y="5" width="14" height="10" rx="1.4" />
+                    <path d="M4.5 6.5L10 10.5L15.5 6.5" />
+                  </svg>
+                </button>
+                <button className="threadActionIcon danger" aria-label="trash" title="Trash" onClick={() => void executeThreadAction("trash")}>
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M6 6.5H14" />
+                    <path d="M7 6.5V15.5H13V6.5" />
+                    <path d="M8 4.5H12" />
+                    <path d="M9 8.5V13.5" />
+                    <path d="M11 8.5V13.5" />
+                  </svg>
+                </button>
               </div>
             </div>
 
@@ -709,10 +1097,13 @@ export function InboxShell() {
               {threadError ? <p className="errorLine">{threadError}</p> : null}
 
               {threadDetail?.messages.map((message) => (
-                <article className="messageCard" key={message.id}>
+                <article className={message.labelIds?.includes("DRAFT") ? "messageCard draft" : "messageCard"} key={message.id}>
                   <p className="messageMeta">
                     <strong>{message.sender}</strong>
-                    <span>{relTime(message.timestamp)}</span>
+                    <span>
+                      {message.labelIds?.includes("DRAFT") ? <em className="messageBadge">Draft</em> : null}
+                      {relTime(message.timestamp)}
+                    </span>
                   </p>
                   <p className="messageBody">{message.body}</p>
                 </article>
@@ -809,20 +1200,51 @@ export function InboxShell() {
       <aside className={isTabletAgentOpen ? "agentPane tabletOpen" : "agentPane"}>
         <div className="agentHead">
           <h3>Claw Agent</h3>
-          <span>Always-on via ⌘J</span>
+          <span>Thread-aware assistant</span>
         </div>
-        <div className="agentFeed">
-          <div className="agentMsg user">Prioritize and summarize this inbox for me.</div>
-          <div className="agentMsg ai">Top 3 urgent: certificate revoked, legal demand letter, investor follow-up due today.</div>
-          <div className="agentMsg ai">I can draft responses, fetch context from Drive/Notion, and queue tasks.</div>
+        <div className="agentFeed" ref={agentFeedRef}>
+          {agentMessages.map((item) => (
+            <div key={item.id} className={item.role === "assistant" ? "agentMsg ai" : item.role === "user" ? "agentMsg user" : "agentMsg system"}>
+              <div className="agentMsgHead">
+                <span className="agentRole">{item.role === "assistant" ? "Agent" : item.role === "user" ? "You" : "System"}</span>
+                <span className="agentTime">{relTime(item.createdAt)}</span>
+              </div>
+              <p className="agentText">{item.text}</p>
+              {item.role !== "user" ? (
+                <div className="agentMeta">
+                  <span className={item.threadAttached ? "agentBadge attached" : "agentBadge detached"}>
+                    {item.threadAttached ? "Thread attached" : "No thread context"}
+                  </span>
+                  {item.threadAttachReason ? <span className="agentReason">{item.threadAttachReason}</span> : null}
+                </div>
+              ) : null}
+            </div>
+          ))}
+          {isAgentWorking ? <div className="agentMsg ai">Working...</div> : null}
         </div>
         <div className="agentComposer">
-          <textarea ref={agentRef} rows={5} placeholder="Ask your executive assistant..." />
-          <div className="agentActions">
-            <button>Run</button>
-            <button>Draft Reply</button>
-            <button>Create Task</button>
+          <div className="agentSessionLine">
+            {activeChatThreadId ? `Thread session: ${activeChatThreadId.slice(-8)}` : "Inbox session"}
+            <span>Enter to send, Shift+Enter for newline</span>
           </div>
+          <textarea
+            ref={agentRef}
+            rows={5}
+            placeholder="Ask your executive assistant... (Enter to send, Shift+Enter for newline)"
+            value={agentInput}
+            onChange={(event) => setAgentInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                const liveValue = event.currentTarget.value.trim();
+                if (!isAgentWorking && liveValue) {
+                  void runAgentChatTurn(liveValue, {
+                    autoInsertDraft: Boolean(openedThreadId && isDraftIntentMessage(liveValue))
+                  });
+                }
+              }
+            }}
+          />
         </div>
         {status ? <p className="statusLine">{status}</p> : null}
       </aside>

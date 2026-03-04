@@ -76,3 +76,20 @@ export type MailComposePayload = {
   subject: string;
   body: string;
 };
+
+export type AgentChatRequest = {
+  message: string;
+  threadId?: string;
+  mailboxAccount?: string;
+  allowThreadAccess?: boolean;
+  autoThreadDetect?: boolean;
+};
+
+export type AgentChatResponse = {
+  assistantMessage: string;
+  sessionId: string | null;
+  model: string | null;
+  sessionKey: string;
+  threadAttached: boolean;
+  threadAttachReason: string;
+};

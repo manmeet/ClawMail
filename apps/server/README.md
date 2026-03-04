@@ -12,6 +12,7 @@ Express scaffolding for OpenClaw orchestration + policy gate + audit log.
 - `GET /v1/inbox?view=inbox|priority|...`
 - `GET /v1/threads/:threadId`
 - `POST /v1/threads/:threadId/agent/actions`
+- `POST /v1/agent/chat`
 - `POST /v1/drafts`
 - `POST /v1/drafts/:draftId/approve-send`
 - `GET|POST /v1/tasks`
@@ -47,3 +48,12 @@ Quick flow:
 Token storage:
 
 - OAuth token is persisted locally in `/Users/manmeetmaggu/ClawMail/apps/server/.data/gmail-token.json`.
+
+## Agent bridge setup (IronClaw/OpenClaw)
+
+`POST /v1/agent/chat` shells out to your local agent CLI.
+
+Optional env vars:
+- `AGENT_CLI_BIN` (default: `ironclaw`)
+- `AGENT_ID` (default: `main`)
+- `AGENT_TIMEOUT_SECONDS` (default: `120`)

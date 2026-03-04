@@ -12,6 +12,7 @@ import { authRouter } from "./routes/auth.js";
 import { syncRouter } from "./routes/sync.js";
 import { connectorRouter } from "./routes/connector.js";
 import { mailRouter } from "./routes/mail.js";
+import { agentChatRouter } from "./routes/agent-chat.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -31,6 +32,7 @@ app.use("/v1", authRouter);
 app.use("/v1", syncRouter);
 app.use("/v1", connectorRouter);
 app.use("/v1", mailRouter);
+app.use("/v1", agentChatRouter);
 
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
