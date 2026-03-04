@@ -27,6 +27,9 @@ Required values:
 
 Optional:
 - `GOOGLE_REDIRECT_URI` (defaults to `http://localhost:8080/v1/auth/google/callback`)
+- `HOST` (default `127.0.0.1`)
+- `PORT` (default `8080`)
+- `CORS_ORIGIN` (optional comma-separated allowlist)
 
 ## 4. Run Locally
 
@@ -46,7 +49,7 @@ Open `http://localhost:3000`.
 
 ## 5. Gmail OAuth Flow
 1. Start server.
-2. In UI, click `Connect Gmail`.
+2. In UI, click `Sync` (it opens OAuth when disconnected).
 3. Complete Google consent.
 4. Return to app and click `Sync`.
 
@@ -96,12 +99,26 @@ kill <pid>
 
 ### Frontend chunk errors in dev/start
 - Restart frontend process.
+- If error includes `Cannot find module './xxx.js'`, clear Next cache:
+```bash
+cd /Users/manmeetmaggu/ClawMail/apps/web
+rm -rf .next
+```
 - Rebuild if needed:
 ```bash
 cd /Users/manmeetmaggu/ClawMail/apps/web
 npm run build
 npm run start
 ```
+
+## 9. Private Remote Access (Phone + Laptop)
+- Deployment/security plan:
+  - `/Users/manmeetmaggu/ClawMail/docs/private-access-deployment.md`
+- Reverse proxy template:
+  - `/Users/manmeetmaggu/ClawMail/deploy/Caddyfile.tailnet.example`
+- Systemd templates:
+  - `/Users/manmeetmaggu/ClawMail/deploy/systemd/clawmail-server.service`
+  - `/Users/manmeetmaggu/ClawMail/deploy/systemd/clawmail-web.service`
 
 ### Push issues
 - Repo is configured to push via SSH:

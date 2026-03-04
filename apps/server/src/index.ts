@@ -17,7 +17,23 @@ import { agentChatRouter } from "./routes/agent-chat.js";
 const app = express();
 app.disable("x-powered-by");
 app.use(helmet());
-app.use(cors({ origin: true, credentials: false }));
+const corsAllowlist = (process.env.CORS_ORIGIN ?? "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    // Non-browser clients (curl, backend jobs) usually have no origin header.
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (corsAllowlist.length === 0) return callback(null, true);
+      if (corsAllowlist.includes(origin)) return callback(null, true);
+      return callback(new Error("Origin not allowed by CORS"));
+    },
+    credentials: false
+  })
+);
 app.use(express.json({ limit: "512kb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -41,6 +57,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 const port = Number(process.env.PORT ?? 8080);
-app.listen(port, () => {
-  console.log(`clawmail-server running on :${port}`);
+const host = process.env.HOST ?? "127.0.0.1";
+app.listen(port, host, () => {
+  console.log(`clawmail-server running on ${host}:${port}`);
 });

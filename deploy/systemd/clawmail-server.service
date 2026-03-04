@@ -1,0 +1,17 @@
+[Unit]
+Description=ClawMail API Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clawmail/apps/server
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/clawmail/apps/server/.env
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=3
+User=clawmail
+Group=clawmail
+
+[Install]
+WantedBy=multi-user.target

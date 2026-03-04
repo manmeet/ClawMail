@@ -1,0 +1,17 @@
+[Unit]
+Description=ClawMail Web App
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clawmail/apps/web
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=3
+User=clawmail
+Group=clawmail
+
+[Install]
+WantedBy=multi-user.target

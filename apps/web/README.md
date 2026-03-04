@@ -15,4 +15,8 @@ npm run dev
 ```
 
 ## API base URL
-- Optional: set `NEXT_PUBLIC_API_BASE_URL` (defaults to `http://localhost:8080`).
+- Default is same-origin `/api`.
+- In local dev, Next rewrites `/api/*` to `http://127.0.0.1:8080/*`.
+- Optional overrides:
+  - `NEXT_PUBLIC_API_BASE_URL` to bypass same-origin routing.
+  - `API_PROXY_TARGET` to change rewrite target (default: `http://127.0.0.1:8080`).
