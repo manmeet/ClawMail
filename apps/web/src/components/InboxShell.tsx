@@ -7,6 +7,7 @@ import {
   createMailDraft,
   getConnectors,
   getMailThread,
+  getServerVersion,
   listMailThreads,
   sendMail,
   sendMailDraft,
@@ -173,6 +174,7 @@ function extractDraftBodyFromAssistant(raw: string) {
 }
 
 export function InboxShell() {
+  const clientVersion = process.env.NEXT_PUBLIC_CLIENT_VERSION ?? "web-dev";
   const [folder, setFolder] = useState<MailFolder>("important");
   const [query, setQuery] = useState("");
   const [threads, setThreads] = useState<MailThread[]>([]);
@@ -200,6 +202,7 @@ export function InboxShell() {
 
   const [gmailConnected, setGmailConnected] = useState(false);
   const [gmailAccount, setGmailAccount] = useState<string | null>(null);
+  const [serverVersion, setServerVersion] = useState<string>("srv-...");
   const [status, setStatus] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const [isCommandOpen, setIsCommandOpen] = useState(false);
@@ -257,6 +260,22 @@ export function InboxShell() {
   useEffect(() => {
     void refreshConnector();
   }, [refreshConnector]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadVersion = async () => {
+      try {
+        const result = await getServerVersion();
+        if (!cancelled) setServerVersion(result.serverVersion);
+      } catch {
+        if (!cancelled) setServerVersion("srv-offline");
+      }
+    };
+    void loadVersion();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isCommandOpen) return;
@@ -911,6 +930,12 @@ export function InboxShell() {
           </button>
         </div>
         <div className="topControls">
+          <span className="versionBadge" title="Client build version">
+            Client {clientVersion}
+          </span>
+          <span className="versionBadge" title="Server runtime version">
+            Server {serverVersion}
+          </span>
           <button className="chromeButton syncButton" onClick={() => void syncInbox()} disabled={isWorking}>
             <span className="syncOrb" />
             Sync

@@ -82,6 +82,11 @@ export async function getConnectors() {
   }>(response);
 }
 
+export async function getServerVersion() {
+  const response = await fetch(`${API_BASE_URL}/v1/version`);
+  return parseResponse<{ serverVersion: string; startedAt: string }>(response);
+}
+
 export async function startGoogleAuth() {
   const response = await fetch(`${API_BASE_URL}/v1/auth/google/start`);
   return parseResponse<{ authUrl: string }>(response);

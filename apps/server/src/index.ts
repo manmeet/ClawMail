@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { execSync } from "node:child_process";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -14,7 +15,20 @@ import { connectorRouter } from "./routes/connector.js";
 import { mailRouter } from "./routes/mail.js";
 import { agentChatRouter } from "./routes/agent-chat.js";
 
+function readServerVersion() {
+  if (process.env.CLAWMAIL_SERVER_VERSION?.trim()) return process.env.CLAWMAIL_SERVER_VERSION.trim();
+  try {
+    const count = execSync("git rev-list --count HEAD", { encoding: "utf8" }).trim();
+    const sha = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+    return `srv-${count}-${sha}`;
+  } catch {
+    return "srv-dev";
+  }
+}
+
 const app = express();
+const serverVersion = readServerVersion();
+const serverStartedAt = new Date().toISOString();
 app.disable("x-powered-by");
 app.use(helmet());
 const corsAllowlist = (process.env.CORS_ORIGIN ?? "")
@@ -37,6 +51,7 @@ app.use(
 app.use(express.json({ limit: "512kb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/v1/version", (_req, res) => res.json({ serverVersion, startedAt: serverStartedAt }));
 
 app.use("/v1", inboxRouter);
 app.use("/v1", agentRouter);
@@ -59,5 +74,5 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 const port = Number(process.env.PORT ?? 8080);
 const host = process.env.HOST ?? "127.0.0.1";
 app.listen(port, host, () => {
-  console.log(`clawmail-server running on ${host}:${port}`);
+  console.log(`clawmail-server running on ${host}:${port} (${serverVersion})`);
 });

@@ -156,6 +156,17 @@ textarea {
   color: var(--muted);
 }
 
+.versionBadge {
+  font-size: 11px;
+  color: #d2c6ab;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(20, 20, 20, 0.9);
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.02em;
+}
+
 .rail {
   grid-area: rail;
   border-right: 1px solid var(--line);
