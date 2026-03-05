@@ -39,6 +39,32 @@ function isTypingTarget(target: EventTarget | null) {
   return tag === "input" || tag === "textarea" || target.isContentEditable;
 }
 
+function splitQuotedBody(raw: string) {
+  const body = raw ?? "";
+  const markerMatch = /\n(?:On .+wrote:|From:\s|Sent:\s|To:\s|Subject:\s|---+\s*Original Message\s*---+)/i.exec(body);
+  const quoteBlockMatch = /\n>/.exec(body);
+  const markerIndex = markerMatch?.index ?? -1;
+  const quoteIndex = quoteBlockMatch?.index ?? -1;
+
+  const splitIndex =
+    markerIndex >= 0 && quoteIndex >= 0 ? Math.min(markerIndex, quoteIndex) : markerIndex >= 0 ? markerIndex : quoteIndex;
+
+  if (splitIndex < 0) {
+    return { main: body.trim(), quoted: "" };
+  }
+
+  return {
+    main: body.slice(0, splitIndex).trim(),
+    quoted: body.slice(splitIndex).trim()
+  };
+}
+
+function buildMessagePreview(raw: string, maxLen = 190) {
+  const compact = raw.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLen) return compact;
+  return `${compact.slice(0, maxLen).trimEnd()}...`;
+}
+
 type AgentPaneMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -159,6 +185,8 @@ export function InboxShell() {
   const [threadDetail, setThreadDetail] = useState<MailThreadDetail | null>(null);
   const [isLoadingThread, setIsLoadingThread] = useState(false);
   const [threadError, setThreadError] = useState<string | null>(null);
+  const [expandedMessages, setExpandedMessages] = useState<Record<string, boolean>>({});
+  const [expandedQuotedBodies, setExpandedQuotedBodies] = useState<Record<string, boolean>>({});
 
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeDraftId, setComposeDraftId] = useState<string | null>(null);
@@ -252,6 +280,17 @@ export function InboxShell() {
       if (reqId !== openThreadReqRef.current) return;
       setThreadDetail(result.item);
       setThreads((prev) => prev.map((thread) => (thread.id === threadId ? { ...thread, unread: false } : thread)));
+      const messages = result.item.messages ?? [];
+      const latestMessageId = messages[messages.length - 1]?.id;
+      const unreadMessageIds = new Set(
+        messages
+          .filter((message) => (message.labelIds ?? []).includes("UNREAD"))
+          .map((message) => message.id)
+      );
+      setExpandedMessages(() =>
+        Object.fromEntries(messages.map((message) => [message.id, Boolean(message.id === latestMessageId || unreadMessageIds.has(message.id))]))
+      );
+      setExpandedQuotedBodies({});
 
       const sender = result.item.messages?.[0]?.sender ?? result.item.participants?.[0] ?? "";
       const nextSubject = result.item.subject.toLowerCase().startsWith("re:") ? result.item.subject : `Re: ${result.item.subject}`;
@@ -301,6 +340,8 @@ export function InboxShell() {
   const closeOpenedThread = useCallback(() => {
     setOpenedThreadId(null);
     setThreadDetail(null);
+    setExpandedMessages({});
+    setExpandedQuotedBodies({});
     setComposeOpen(false);
     setComposePayload({ to: [], cc: [], bcc: [], subject: "", body: "" });
     setComposeDraftId(null);
@@ -336,6 +377,8 @@ export function InboxShell() {
     async (action: "archive" | "mark_read" | "mark_unread" | "snooze" | "trash") => {
       const id = openedThreadId ?? selectedThread?.id;
       if (!id) return;
+      const currentIndex = threads.findIndex((thread) => thread.id === id);
+      const nextCandidate = currentIndex >= 0 ? threads[currentIndex + 1] ?? threads[currentIndex - 1] ?? null : null;
       setIsWorking(true);
       setStatus(null);
       try {
@@ -348,10 +391,18 @@ export function InboxShell() {
           setThreads((prev) => prev.map((thread) => (thread.id === id ? { ...thread, unread: true } : thread)));
         }
         if (action === "archive" || action === "trash" || action === "snooze") {
-          setThreads((prev) => prev.filter((thread) => thread.id !== id));
-          setSelectedIndex(0);
+          setThreads((prev) => {
+            const nextThreads = prev.filter((thread) => thread.id !== id);
+            const nextIndex = Math.min(Math.max(currentIndex, 0), Math.max(nextThreads.length - 1, 0));
+            setSelectedIndex(nextIndex);
+            return nextThreads;
+          });
         }
         if (action === "archive" || action === "trash" || action === "snooze") {
+          if (openedThreadId && nextCandidate?.id) {
+            void openThread(nextCandidate.id);
+            return;
+          }
           closeOpenedThread();
           return;
         }
@@ -365,7 +416,7 @@ export function InboxShell() {
         setIsWorking(false);
       }
     },
-    [closeOpenedThread, openedThreadId, refreshThreads, selectedThread?.id]
+    [closeOpenedThread, openedThreadId, openThread, refreshThreads, selectedThread?.id, threads]
   );
 
   const saveDraft = useCallback(async () => {
@@ -1096,18 +1147,77 @@ export function InboxShell() {
               {isLoadingThread ? <p className="subtle">Loading thread...</p> : null}
               {threadError ? <p className="errorLine">{threadError}</p> : null}
 
-              {threadDetail?.messages.map((message) => (
-                <article className={message.labelIds?.includes("DRAFT") ? "messageCard draft" : "messageCard"} key={message.id}>
-                  <p className="messageMeta">
-                    <strong>{message.sender}</strong>
-                    <span>
-                      {message.labelIds?.includes("DRAFT") ? <em className="messageBadge">Draft</em> : null}
-                      {relTime(message.timestamp)}
-                    </span>
-                  </p>
-                  <p className="messageBody">{message.body}</p>
-                </article>
-              ))}
+              {threadDetail?.messages.map((message) => {
+                const isExpanded = Boolean(expandedMessages[message.id]);
+                const { main, quoted } = splitQuotedBody(message.body);
+                const showQuoted = Boolean(expandedQuotedBodies[message.id]);
+                const preview = buildMessagePreview(main || message.body);
+
+                return (
+                  <article
+                    className={`${message.labelIds?.includes("DRAFT") ? "messageCard draft" : "messageCard"} ${isExpanded ? "expanded" : "collapsed"}`}
+                    key={message.id}
+                    onClick={() => {
+                      if (!isExpanded) {
+                        setExpandedMessages((prev) => ({ ...prev, [message.id]: true }));
+                      }
+                    }}
+                  >
+                    <p className="messageMeta">
+                      <strong>{message.sender}</strong>
+                      <span>
+                        {message.labelIds?.includes("DRAFT") ? <em className="messageBadge">Draft</em> : null}
+                        {relTime(message.timestamp)}
+                      </span>
+                    </p>
+
+                    {isExpanded ? (
+                      <>
+                        <p className="messageBody">{main || message.body}</p>
+                        {quoted ? (
+                          showQuoted ? (
+                            <div className="messageQuotedWrap">
+                              <p className="messageBody messageQuoted">{quoted}</p>
+                              <button
+                                type="button"
+                                className="messageExpandQuoted"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setExpandedQuotedBodies((prev) => ({ ...prev, [message.id]: false }));
+                                }}
+                              >
+                                Hide quoted text
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="messageExpandQuoted"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setExpandedQuotedBodies((prev) => ({ ...prev, [message.id]: true }));
+                              }}
+                            >
+                              ... Show quoted text
+                            </button>
+                          )
+                        ) : null}
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="messageCollapsedPreview"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setExpandedMessages((prev) => ({ ...prev, [message.id]: true }));
+                        }}
+                      >
+                        {preview || "Open message"}
+                      </button>
+                    )}
+                  </article>
+                );
+              })}
             </div>
 
             {composeOpen ? (

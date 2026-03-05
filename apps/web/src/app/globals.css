@@ -626,6 +626,11 @@ textarea:focus {
   box-shadow: var(--shadow-soft);
 }
 
+.messageCard.collapsed {
+  cursor: pointer;
+  opacity: 0.94;
+}
+
 .messageCard.draft {
   border-left-color: #8fb3ff;
   border-color: rgba(143, 179, 255, 0.36);
@@ -661,6 +666,45 @@ textarea:focus {
   color: #f8f2e7;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.messageCollapsedPreview {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #f8f2e7;
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+}
+
+.messageExpandQuoted {
+  margin-top: 10px;
+  border: 1px solid rgba(212, 175, 55, 0.34);
+  background: rgba(33, 30, 24, 0.88);
+  border-radius: 10px;
+  color: #e8dcbf;
+  font-size: 12px;
+  font-family: var(--font-mono), monospace;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.messageExpandQuoted:hover {
+  border-color: rgba(212, 175, 55, 0.56);
+}
+
+.messageQuotedWrap {
+  margin-top: 8px;
+}
+
+.messageBody.messageQuoted {
+  color: #d6c7a2;
+  border-left: 2px solid rgba(212, 175, 55, 0.35);
+  padding-left: 10px;
 }
 
 .replyDock {
