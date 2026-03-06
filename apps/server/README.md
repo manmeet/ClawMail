@@ -54,6 +54,6 @@ Token storage:
 `POST /v1/agent/chat` shells out to your local agent CLI.
 
 Optional env vars:
-- `AGENT_CLI_BIN` (default: `ironclaw`)
+- `AGENT_CLI_BIN` (default auto-detect: `openclaw`, then `ironclaw`)
 - `AGENT_ID` (default: `main`)
 - `AGENT_TIMEOUT_SECONDS` (default: `120`)

@@ -20,7 +20,7 @@ export type IronclawAgentResponse = {
 
 const DEFAULT_AGENT_ID = process.env.AGENT_ID ?? "main";
 const DEFAULT_TIMEOUT_SECONDS = Number(process.env.AGENT_TIMEOUT_SECONDS ?? 120);
-const DEFAULT_CLI_BIN = process.env.AGENT_CLI_BIN ?? "ironclaw";
+const DEFAULT_CLI_BIN = process.env.AGENT_CLI_BIN;
 const MAX_STDIO_BUFFER = 12 * 1024 * 1024;
 
 function parseFirstJsonObject(text: string): Record<string, unknown> {
@@ -77,7 +77,9 @@ function extractModel(payload: Record<string, unknown>): string | null {
 }
 
 export async function runIronclawAgent(request: IronclawAgentRequest): Promise<IronclawAgentResponse> {
-  const cliBin = request.cliBin ?? DEFAULT_CLI_BIN;
+  const cliCandidates = [request.cliBin, DEFAULT_CLI_BIN, "openclaw", "ironclaw"].filter(
+    (item, index, all): item is string => typeof item === "string" && item.trim().length > 0 && all.indexOf(item) === index
+  );
   const agentId = request.agentId ?? DEFAULT_AGENT_ID;
   const timeoutSeconds =
     typeof request.timeoutSeconds === "number" && Number.isFinite(request.timeoutSeconds)
@@ -97,34 +99,50 @@ export async function runIronclawAgent(request: IronclawAgentRequest): Promise<I
     String(timeoutSeconds)
   ];
 
-  try {
-    const { stdout, stderr } = await execFileAsync(cliBin, args, {
-      timeout: timeoutSeconds * 1000 + 5000,
-      maxBuffer: MAX_STDIO_BUFFER
-    });
-
-    const payload = parseFirstJsonObject(stdout);
-    const assistantMessage = extractAssistantText(payload);
-    if (stderr.trim()) {
-      console.warn(`[agent:${cliBin}] stderr: ${stderr.trim()}`);
-    }
-
-    return {
-      assistantMessage,
-      sessionId: extractSessionId(payload),
-      model: extractModel(payload),
-      raw: payload
-    };
-  } catch (error) {
-    if (error && typeof error === "object") {
-      const err = error as {
-        message?: string;
-        stdout?: string;
-        stderr?: string;
-      };
-      const details = [err.message, err.stderr, err.stdout].filter(Boolean).join(" | ");
-      throw new Error(`Failed to run ${cliBin} agent: ${details}`);
-    }
-    throw error;
+  if (cliCandidates.length === 0) {
+    throw new Error("Agent CLI not configured. Set AGENT_CLI_BIN to your OpenClaw executable.");
   }
+
+  let lastErrorDetails = "";
+  for (const cliBin of cliCandidates) {
+    try {
+      const { stdout, stderr } = await execFileAsync(cliBin, args, {
+        timeout: timeoutSeconds * 1000 + 5000,
+        maxBuffer: MAX_STDIO_BUFFER
+      });
+
+      const payload = parseFirstJsonObject(stdout);
+      const assistantMessage = extractAssistantText(payload);
+      if (stderr.trim()) {
+        console.warn(`[agent:${cliBin}] stderr: ${stderr.trim()}`);
+      }
+
+      return {
+        assistantMessage,
+        sessionId: extractSessionId(payload),
+        model: extractModel(payload),
+        raw: payload
+      };
+    } catch (error) {
+      if (error && typeof error === "object") {
+        const err = error as {
+          code?: string;
+          message?: string;
+          stdout?: string;
+          stderr?: string;
+        };
+        if (err.code === "ENOENT") {
+          lastErrorDetails = `Missing CLI '${cliBin}'`;
+          continue;
+        }
+        const details = [err.message, err.stderr, err.stdout].filter(Boolean).join(" | ");
+        throw new Error(`Failed to run ${cliBin} agent: ${details}`);
+      }
+      throw error;
+    }
+  }
+
+  throw new Error(
+    `No agent CLI found (${cliCandidates.join(", ")}). Install OpenClaw or set AGENT_CLI_BIN to the correct executable. ${lastErrorDetails}`
+  );
 }
