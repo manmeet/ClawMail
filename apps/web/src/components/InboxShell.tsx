@@ -81,6 +81,14 @@ function buildMessagePreview(raw: string, maxLen = 190) {
   return `${compact.slice(0, maxLen).trimEnd()}...`;
 }
 
+type NormalizedThreadMessage = {
+  id: string;
+  main: string;
+  quoted: string;
+  preview: string;
+  rawBody: string;
+};
+
 function buildReplyDefaults(thread: MailThreadDetail, mailboxAccount: string | null, replyAll = false) {
   const sender = thread.messages?.[0]?.sender ?? thread.participants?.[0] ?? "";
   const participantEmails = thread.participants.map((item) => item.trim()).filter((item) => item.includes("@"));
@@ -258,6 +266,40 @@ export function InboxShell() {
 
   const selectedThread = useMemo(() => threads[selectedIndex] ?? null, [threads, selectedIndex]);
   const replyComposerReady = !openedThreadId || Boolean(threadDetail);
+  const threadMessageNormalizationKey = useMemo(() => {
+    if (!threadDetail) return "";
+    return `${threadDetail.id}:${threadDetail.messages.map((message) => message.id).join("|")}`;
+  }, [threadDetail]);
+  const normalizedThreadMessages = useMemo<Record<string, NormalizedThreadMessage>>(() => {
+    if (!threadDetail) return {};
+
+    return threadDetail.messages.reduce<Record<string, NormalizedThreadMessage>>((acc, message) => {
+      const rawBody = message.body ?? "";
+      const { main, quoted } = splitQuotedBody(rawBody);
+      acc[message.id] = {
+        id: message.id,
+        main,
+        quoted,
+        preview: buildMessagePreview(main || rawBody),
+        rawBody
+      };
+      return acc;
+    }, {});
+  }, [threadDetail?.id, threadMessageNormalizationKey]);
+  const threadMessageViewModels = useMemo(() => {
+    if (!threadDetail) return [];
+
+    return threadDetail.messages.map((message) => ({
+      message,
+      normalized: normalizedThreadMessages[message.id] ?? {
+        id: message.id,
+        main: "",
+        quoted: "",
+        preview: "",
+        rawBody: message.body ?? ""
+      }
+    }));
+  }, [normalizedThreadMessages, threadDetail?.id, threadMessageNormalizationKey]);
 
   const refreshThreads = useCallback(async () => {
     setIsLoadingList(true);
@@ -1323,11 +1365,9 @@ export function InboxShell() {
               {isLoadingThread ? <p className="subtle">Loading thread...</p> : null}
               {threadError ? <p className="errorLine">{threadError}</p> : null}
 
-              {threadDetail?.messages.map((message) => {
+              {threadMessageViewModels.map(({ message, normalized }) => {
                 const isExpanded = Boolean(expandedMessages[message.id]);
-                const { main, quoted } = splitQuotedBody(message.body);
                 const showQuoted = Boolean(expandedQuotedBodies[message.id]);
-                const preview = buildMessagePreview(main || message.body);
 
                 return (
                   <article
@@ -1350,11 +1390,11 @@ export function InboxShell() {
 
                     {isExpanded ? (
                       <>
-                        <p className="messageBody">{main || message.body}</p>
-                        {quoted ? (
+                        <p className="messageBody">{normalized.main || normalized.rawBody}</p>
+                        {normalized.quoted ? (
                           showQuoted ? (
                             <div className="messageQuotedWrap">
-                              <p className="messageBody messageQuoted">{quoted}</p>
+                              <p className="messageBody messageQuoted">{normalized.quoted}</p>
                               <button
                                 type="button"
                                 className="messageExpandQuoted"
@@ -1393,7 +1433,7 @@ export function InboxShell() {
                           setExpandedQuotedBodies({});
                         }}
                       >
-                        {preview || "Open message"}
+                        {normalized.preview || "Open message"}
                       </button>
                     )}
                   </article>
