@@ -46,7 +46,7 @@ type ThreadContext = {
   messages: Array<{ sender: string; body: string; timestamp: string }>;
 };
 
-function truncate(value: string, max = 1200): string {
+function truncate(value: string, max = 400): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max)}...`;
 }
@@ -68,7 +68,7 @@ function buildSessionKey(threadId: string | undefined, mailboxAccount: string | 
 function toThreadContext(data: Record<string, unknown>): ThreadContext {
   const messages = Array.isArray(data.messages) ? data.messages : [];
   const normalizedMessages = messages
-    .slice(-6)
+    .slice(-3)
     .map((message) => {
       if (!message || typeof message !== "object") return null;
       const sender = (message as Record<string, unknown>).sender;

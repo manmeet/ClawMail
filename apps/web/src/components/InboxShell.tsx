@@ -34,6 +34,18 @@ function relTime(iso: string) {
   return `${Math.floor(hrs / 24)}d`;
 }
 
+function formatBuildStamp(iso: string | null | undefined) {
+  if (!iso) return "unknown";
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return "unknown";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(parsed);
+}
+
 function isTypingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName.toLowerCase();
@@ -42,7 +54,10 @@ function isTypingTarget(target: EventTarget | null) {
 
 function splitQuotedBody(raw: string) {
   const body = raw ?? "";
-  const markerMatch = /\n(?:On .+wrote:|From:\s|Sent:\s|To:\s|Subject:\s|---+\s*Original Message\s*---+)/i.exec(body);
+  const markerMatch =
+    /\n(?:On .+wrote:|From:\s|Sent:\s|To:\s|Subject:\s|Content-Type:\s|Content-Transfer-Encoding:\s|---+\s*Original Message\s*---+|--[a-z0-9_-]{12,})/i.exec(
+      body
+    );
   const quoteBlockMatch = /\n>/.exec(body);
   const markerIndex = markerMatch?.index ?? -1;
   const quoteIndex = quoteBlockMatch?.index ?? -1;
@@ -64,6 +79,17 @@ function buildMessagePreview(raw: string, maxLen = 190) {
   const compact = raw.replace(/\s+/g, " ").trim();
   if (compact.length <= maxLen) return compact;
   return `${compact.slice(0, maxLen).trimEnd()}...`;
+}
+
+function buildReplyDefaults(thread: MailThreadDetail, mailboxAccount: string | null, replyAll = false) {
+  const sender = thread.messages?.[0]?.sender ?? thread.participants?.[0] ?? "";
+  const participantEmails = thread.participants.map((item) => item.trim()).filter((item) => item.includes("@"));
+  const uniqueEmails = Array.from(new Set(participantEmails));
+  const accountLower = (mailboxAccount ?? "").toLowerCase();
+  const filteredAll = uniqueEmails.filter((email) => email.toLowerCase() !== accountLower);
+  const to = replyAll ? (filteredAll.length > 0 ? filteredAll : sender ? [sender] : []) : sender ? [sender] : [];
+  const subject = thread.subject.toLowerCase().startsWith("re:") ? thread.subject : `Re: ${thread.subject}`;
+  return { to, subject };
 }
 
 type AgentPaneMessage = {
@@ -175,6 +201,7 @@ function extractDraftBodyFromAssistant(raw: string) {
 
 export function InboxShell() {
   const clientVersion = process.env.NEXT_PUBLIC_CLIENT_VERSION ?? "web-dev";
+  const clientBuiltAt = process.env.NEXT_PUBLIC_CLIENT_BUILT_AT ?? "";
   const [folder, setFolder] = useState<MailFolder>("important");
   const [query, setQuery] = useState("");
   const [threads, setThreads] = useState<MailThread[]>([]);
@@ -203,11 +230,10 @@ export function InboxShell() {
   const [gmailConnected, setGmailConnected] = useState(false);
   const [gmailAccount, setGmailAccount] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string>("srv-...");
+  const [serverStartedAt, setServerStartedAt] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const [isCommandOpen, setIsCommandOpen] = useState(false);
-  const [accountTabs, setAccountTabs] = useState<string[]>([]);
-  const [activeAccount, setActiveAccount] = useState(0);
   const [isTabletAgentOpen, setIsTabletAgentOpen] = useState(false);
   const [agentInput, setAgentInput] = useState("");
   const [isAgentWorking, setIsAgentWorking] = useState(false);
@@ -223,6 +249,7 @@ export function InboxShell() {
   const openThreadReqRef = useRef(0);
 
   const selectedThread = useMemo(() => threads[selectedIndex] ?? null, [threads, selectedIndex]);
+  const replyComposerReady = !openedThreadId || Boolean(threadDetail);
 
   const refreshThreads = useCallback(async () => {
     setIsLoadingList(true);
@@ -244,9 +271,6 @@ export function InboxShell() {
       const gmail = connectors.items.find((item) => item.id === "gmail");
       setGmailConnected(Boolean(gmail?.connected));
       setGmailAccount(gmail?.account ?? null);
-      if (gmail?.connected && gmail.account) {
-        setAccountTabs((prev) => (prev.includes(gmail.account as string) ? prev : [...prev, gmail.account as string]));
-      }
     } catch {
       setGmailConnected(false);
       setGmailAccount(null);
@@ -266,9 +290,15 @@ export function InboxShell() {
     const loadVersion = async () => {
       try {
         const result = await getServerVersion();
-        if (!cancelled) setServerVersion(result.serverVersion);
+        if (!cancelled) {
+          setServerVersion(result.serverVersion);
+          setServerStartedAt(result.startedAt);
+        }
       } catch {
-        if (!cancelled) setServerVersion("srv-offline");
+        if (!cancelled) {
+          setServerVersion("srv-offline");
+          setServerStartedAt(null);
+        }
       }
     };
     void loadVersion();
@@ -289,10 +319,11 @@ export function InboxShell() {
     container.scrollTop = container.scrollHeight;
   }, []);
 
-  const openThread = useCallback(async (threadId: string, options?: { openComposer?: boolean }) => {
+  const openThread = useCallback(async (threadId: string, options?: { openComposer?: boolean; replyAll?: boolean }) => {
     const reqId = ++openThreadReqRef.current;
     setOpenedThreadId(threadId);
     setThreadError(null);
+    setStatus(null);
     setIsLoadingThread(true);
     try {
       const result = await getMailThread(threadId);
@@ -300,26 +331,26 @@ export function InboxShell() {
       setThreadDetail(result.item);
       setThreads((prev) => prev.map((thread) => (thread.id === threadId ? { ...thread, unread: false } : thread)));
       const messages = result.item.messages ?? [];
+      const unreadMessageIds = messages
+        .filter((message) => (message.labelIds ?? []).includes("UNREAD"))
+        .map((message) => message.id);
       const latestMessageId = messages[messages.length - 1]?.id;
-      const unreadMessageIds = new Set(
-        messages
-          .filter((message) => (message.labelIds ?? []).includes("UNREAD"))
-          .map((message) => message.id)
-      );
-      setExpandedMessages(() =>
-        Object.fromEntries(messages.map((message) => [message.id, Boolean(message.id === latestMessageId || unreadMessageIds.has(message.id))]))
-      );
+      setExpandedMessages(() => {
+        if (unreadMessageIds.length > 0) {
+          return Object.fromEntries(unreadMessageIds.map((messageId) => [messageId, true]));
+        }
+        return latestMessageId ? { [latestMessageId]: true } : {};
+      });
       setExpandedQuotedBodies({});
 
-      const sender = result.item.messages?.[0]?.sender ?? result.item.participants?.[0] ?? "";
-      const nextSubject = result.item.subject.toLowerCase().startsWith("re:") ? result.item.subject : `Re: ${result.item.subject}`;
+      const replyDefaults = buildReplyDefaults(result.item, gmailAccount, Boolean(options?.replyAll));
       const cachedDraft = threadDraftCache[threadId];
       setComposePayload({
         threadId: result.item.id,
-        to: cachedDraft?.to ?? (sender ? [sender] : []),
+        to: cachedDraft?.to ?? replyDefaults.to,
         cc: cachedDraft?.cc ?? [],
         bcc: cachedDraft?.bcc ?? [],
-        subject: cachedDraft?.subject ?? nextSubject,
+        subject: cachedDraft?.subject ?? replyDefaults.subject,
         body: cachedDraft?.body ?? ""
       });
       setComposeOpen(Boolean(options?.openComposer || cachedDraft));
@@ -334,12 +365,13 @@ export function InboxShell() {
         setIsLoadingThread(false);
       }
     }
-  }, [scrollThreadToBottom, threadDraftCache]);
+  }, [gmailAccount, scrollThreadToBottom, threadDraftCache]);
 
   const openNewCompose = useCallback(() => {
     setOpenedThreadId(null);
     setThreadDetail(null);
     setComposeDraftId(null);
+    setStatus(null);
     setComposePayload({
       to: [],
       cc: [],
@@ -362,34 +394,34 @@ export function InboxShell() {
     setExpandedMessages({});
     setExpandedQuotedBodies({});
     setComposeOpen(false);
+    setStatus(null);
     setComposePayload({ to: [], cc: [], bcc: [], subject: "", body: "" });
     setComposeDraftId(null);
   }, []);
 
   const openReplyComposer = useCallback(
     (replyAll = false) => {
-      if (!threadDetail || !openedThreadId) return;
-      const sender = threadDetail.messages?.[0]?.sender ?? threadDetail.participants?.[0] ?? "";
-      const participantEmails = threadDetail.participants
-        .map((item) => item.trim())
-        .filter((item) => item.includes("@"));
-      const uniqueEmails = Array.from(new Set(participantEmails));
-      const accountLower = (gmailAccount ?? "").toLowerCase();
-      const filteredAll = uniqueEmails.filter((email) => email.toLowerCase() !== accountLower);
+      if (!openedThreadId) return;
+      if (!threadDetail) {
+        setStatus(null);
+        setComposeOpen(true);
+        setComposePayload((prev) => ({ ...prev, threadId: openedThreadId }));
+        void openThread(openedThreadId, { openComposer: true, replyAll });
+        return;
+      }
+      const replyDefaults = buildReplyDefaults(threadDetail, gmailAccount, replyAll);
 
-      const nextTo = replyAll ? (filteredAll.length > 0 ? filteredAll : sender ? [sender] : []) : sender ? [sender] : [];
-      const nextSubject = threadDetail.subject.toLowerCase().startsWith("re:") ? threadDetail.subject : `Re: ${threadDetail.subject}`;
-
+      setStatus(null);
       setComposePayload((prev) => ({
         ...prev,
         threadId: openedThreadId,
-        to: nextTo,
-        subject: prev.subject || nextSubject
+        to: replyDefaults.to,
+        subject: prev.subject || replyDefaults.subject
       }));
       setComposeOpen(true);
       setTimeout(() => replyRef.current?.focus(), 30);
     },
-    [gmailAccount, openedThreadId, threadDetail]
+    [gmailAccount, openThread, openedThreadId, threadDetail]
   );
 
   const executeThreadAction = useCallback(
@@ -397,7 +429,6 @@ export function InboxShell() {
       const id = openedThreadId ?? selectedThread?.id;
       if (!id) return;
       const currentIndex = threads.findIndex((thread) => thread.id === id);
-      const nextCandidate = currentIndex >= 0 ? threads[currentIndex + 1] ?? threads[currentIndex - 1] ?? null : null;
       setIsWorking(true);
       setStatus(null);
       try {
@@ -418,10 +449,6 @@ export function InboxShell() {
           });
         }
         if (action === "archive" || action === "trash" || action === "snooze") {
-          if (openedThreadId && nextCandidate?.id) {
-            void openThread(nextCandidate.id);
-            return;
-          }
           closeOpenedThread();
           return;
         }
@@ -435,7 +462,7 @@ export function InboxShell() {
         setIsWorking(false);
       }
     },
-    [closeOpenedThread, openedThreadId, openThread, refreshThreads, selectedThread?.id, threads]
+    [closeOpenedThread, openedThreadId, refreshThreads, selectedThread?.id, threads]
   );
 
   const saveDraft = useCallback(async () => {
@@ -444,6 +471,7 @@ export function InboxShell() {
       return;
     }
     setIsWorking(true);
+    setStatus("Saving draft...");
     try {
       const draft = await createMailDraft(composePayload);
       setComposeDraftId(draft.item.id ?? null);
@@ -488,6 +516,7 @@ export function InboxShell() {
 
       const isReplyInOpenThread = Boolean(openedThreadId && threadId && openedThreadId === threadId);
       if (isReplyInOpenThread && threadId) {
+        const localMessageId = `local-sent-${Date.now()}`;
         setThreadDraftCache((prev) => {
           const next = { ...prev };
           delete next[threadId];
@@ -502,7 +531,7 @@ export function InboxShell() {
             messages: [
               ...prev.messages,
               {
-                id: `local-sent-${Date.now()}`,
+                id: localMessageId,
                 sender: gmailAccount ?? "you",
                 body: messageBody,
                 timestamp: sentAt
@@ -525,6 +554,8 @@ export function InboxShell() {
         setComposeOpen(false);
         setComposeDraftId(null);
         setComposePayload((prev) => ({ ...prev, body: "" }));
+        setExpandedMessages({ [localMessageId]: true });
+        setExpandedQuotedBodies({});
         void refreshThreads();
         window.setTimeout(scrollThreadToBottom, 20);
       } else {
@@ -565,10 +596,7 @@ export function InboxShell() {
     }
   }, [gmailConnected, refreshConnector, refreshThreads]);
 
-  const activeMailboxAccount = useMemo(
-    () => gmailAccount ?? accountTabs[activeAccount] ?? undefined,
-    [accountTabs, activeAccount, gmailAccount]
-  );
+  const activeMailboxAccount = useMemo(() => gmailAccount ?? undefined, [gmailAccount]);
   const activeChatThreadId = openedThreadId ?? undefined;
   const activeAgentSessionKey = useMemo(
     () => buildAgentSessionKey(activeChatThreadId, activeMailboxAccount),
@@ -819,6 +847,12 @@ export function InboxShell() {
         return;
       }
 
+      if (event.shiftKey && event.key.toLowerCase() === "u") {
+        event.preventDefault();
+        void executeThreadAction("mark_unread");
+        return;
+      }
+
       if (event.key.toLowerCase() === "u") {
         event.preventDefault();
         closeOpenedThread();
@@ -833,12 +867,12 @@ export function InboxShell() {
 
       if (event.key.toLowerCase() === "r" || event.key.toLowerCase() === "a") {
         event.preventDefault();
+        const replyAll = event.key.toLowerCase() === "a";
         if (!openedThreadId && selectedThread?.id) {
-          void openThread(selectedThread.id, { openComposer: true });
+          void openThread(selectedThread.id, { openComposer: true, replyAll });
           return;
         }
-        setComposeOpen(true);
-        setTimeout(() => replyRef.current?.focus(), 30);
+        openReplyComposer(replyAll);
         return;
       }
 
@@ -889,6 +923,7 @@ export function InboxShell() {
     executeThreadAction,
     isSidebarOpen,
     openNewCompose,
+    openReplyComposer,
     openThread,
     openedThreadId,
     runAgentFromComposer,
@@ -901,40 +936,16 @@ export function InboxShell() {
     <main className="mailApp">
       <header className="mailTopBar">
         <div className="topTabs">
-          {(accountTabs.length > 0 ? accountTabs : [gmailAccount ?? "No account"]).map((account, index) => (
-            <button key={account} className={index === activeAccount ? "topTab active" : "topTab"} onClick={() => setActiveAccount(index)}>
-              {account}
-            </button>
-          ))}
-          <button
-            className="topTab addTab"
-            aria-label="add account"
-            onClick={() => {
-              const value = window.prompt("Add another mailbox tab (email address):", "");
-              if (value && value.includes("@")) {
-                setAccountTabs((prev) => {
-                  if (prev.includes(value)) {
-                    setActiveAccount(prev.indexOf(value));
-                    return prev;
-                  }
-                  const next = [...prev, value];
-                  setActiveAccount(next.length - 1);
-                  return next;
-                });
-              } else if (value) {
-                setStatus("Enter a valid email address");
-              }
-            }}
-          >
-            +
-          </button>
+          <span className="topTab active" title={gmailAccount ?? "No connected mailbox"}>
+            {gmailAccount ?? "No connected mailbox"}
+          </span>
         </div>
         <div className="topControls">
-          <span className="versionBadge" title="Client build version">
-            Client {clientVersion}
+          <span className="versionBadge" title={clientBuiltAt ? `Client built ${clientBuiltAt}` : "Client build version"}>
+            Client {clientVersion} · {formatBuildStamp(clientBuiltAt)}
           </span>
-          <span className="versionBadge" title="Server runtime version">
-            Server {serverVersion}
+          <span className="versionBadge" title={serverStartedAt ? `Server restarted ${serverStartedAt}` : "Server runtime version"}>
+            Server {serverVersion} · {formatBuildStamp(serverStartedAt)}
           </span>
           <button className="chromeButton syncButton" onClick={() => void syncInbox()} disabled={isWorking}>
             <span className="syncOrb" />
@@ -1122,7 +1133,7 @@ export function InboxShell() {
               <div className="threadActions">
                 <button
                   className="threadActionIcon"
-                  aria-label="reply"
+                  aria-label="Reply"
                   title="Reply"
                   onClick={() => openReplyComposer(false)}
                 >
@@ -1133,7 +1144,7 @@ export function InboxShell() {
                 </button>
                 <button
                   className="threadActionIcon"
-                  aria-label="reply all"
+                  aria-label="Reply all"
                   title="Reply all"
                   onClick={() => openReplyComposer(true)}
                 >
@@ -1143,20 +1154,20 @@ export function InboxShell() {
                     <path d="M7.5 10H13C15.5 10 17 11.5 17 14V15" />
                   </svg>
                 </button>
-                <button className="threadActionIcon" aria-label="archive" title="Archive" onClick={() => void executeThreadAction("archive")}>
+                <button className="threadActionIcon" aria-label="Archive" title="Archive" onClick={() => void executeThreadAction("archive")}>
                   <svg viewBox="0 0 20 20" aria-hidden="true">
                     <rect x="3" y="4" width="14" height="4" rx="1.2" />
                     <path d="M4.5 8V15.5H15.5V8" />
                     <path d="M8 11H12" />
                   </svg>
                 </button>
-                <button className="threadActionIcon" aria-label="mark unread" title="Mark unread" onClick={() => void executeThreadAction("mark_unread")}>
+                <button className="threadActionIcon" aria-label="Mark unread" title="Mark unread" onClick={() => void executeThreadAction("mark_unread")}>
                   <svg viewBox="0 0 20 20" aria-hidden="true">
                     <rect x="3" y="5" width="14" height="10" rx="1.4" />
                     <path d="M4.5 6.5L10 10.5L15.5 6.5" />
                   </svg>
                 </button>
-                <button className="threadActionIcon danger" aria-label="trash" title="Trash" onClick={() => void executeThreadAction("trash")}>
+                <button className="threadActionIcon danger" aria-label="Trash" title="Trash" onClick={() => void executeThreadAction("trash")}>
                   <svg viewBox="0 0 20 20" aria-hidden="true">
                     <path d="M6 6.5H14" />
                     <path d="M7 6.5V15.5H13V6.5" />
@@ -1184,7 +1195,8 @@ export function InboxShell() {
                     key={message.id}
                     onClick={() => {
                       if (!isExpanded) {
-                        setExpandedMessages((prev) => ({ ...prev, [message.id]: true }));
+                        setExpandedMessages({ [message.id]: true });
+                        setExpandedQuotedBodies({});
                       }
                     }}
                   >
@@ -1206,24 +1218,27 @@ export function InboxShell() {
                               <button
                                 type="button"
                                 className="messageExpandQuoted"
+                                aria-label="Hide quoted text"
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   setExpandedQuotedBodies((prev) => ({ ...prev, [message.id]: false }));
                                 }}
                               >
-                                Hide quoted text
+                                ...
                               </button>
                             </div>
                           ) : (
                             <button
                               type="button"
                               className="messageExpandQuoted"
+                              aria-label="Show hidden quoted text"
+                              title="Show hidden quoted text"
                               onClick={(event) => {
                                 event.stopPropagation();
                                 setExpandedQuotedBodies((prev) => ({ ...prev, [message.id]: true }));
                               }}
                             >
-                              ... Show quoted text
+                              ...
                             </button>
                           )
                         ) : null}
@@ -1234,7 +1249,8 @@ export function InboxShell() {
                         className="messageCollapsedPreview"
                         onClick={(event) => {
                           event.stopPropagation();
-                          setExpandedMessages((prev) => ({ ...prev, [message.id]: true }));
+                          setExpandedMessages({ [message.id]: true });
+                          setExpandedQuotedBodies({});
                         }}
                       >
                         {preview || "Open message"}
@@ -1248,11 +1264,12 @@ export function InboxShell() {
             {composeOpen ? (
               <div className="replyDock open">
                 <div className="replyHead">
-                  <strong>Draft to {composePayload.to[0] ?? "recipient"}</strong>
-                  <span>Cmd/Ctrl+Enter to send</span>
+                  <strong>{replyComposerReady ? `Draft to ${composePayload.to[0] ?? "recipient"}` : "Preparing reply..."}</strong>
+                  <span>{replyComposerReady ? "Cmd/Ctrl+Enter to send" : "Loading thread context"}</span>
                 </div>
                 <div className="replyFields">
                   <input
+                    disabled={!replyComposerReady}
                     value={composePayload.to.join(", ")}
                     onChange={(event) =>
                       setComposePayload((prev) => ({
@@ -1263,6 +1280,7 @@ export function InboxShell() {
                     placeholder="To"
                   />
                   <input
+                    disabled={!replyComposerReady}
                     value={composePayload.subject}
                     onChange={(event) => setComposePayload((prev) => ({ ...prev, subject: event.target.value }))}
                     placeholder="Subject"
@@ -1270,16 +1288,17 @@ export function InboxShell() {
                   <textarea
                     ref={replyRef}
                     rows={5}
+                    disabled={!replyComposerReady}
                     value={composePayload.body}
                     onChange={(event) => setComposePayload((prev) => ({ ...prev, body: event.target.value }))}
-                    placeholder="Write a reply..."
+                    placeholder={replyComposerReady ? "Write a reply..." : "Loading reply context..."}
                   />
                 </div>
                 <div className="replyActions">
-                  <button onClick={() => void saveDraft()} disabled={isWorking}>
+                  <button onClick={() => void saveDraft()} disabled={isWorking || !replyComposerReady}>
                     Save Draft
                   </button>
-                  <button onClick={() => void sendCompose()} disabled={isWorking}>
+                  <button onClick={() => void sendCompose()} disabled={isWorking || !replyComposerReady}>
                     Send
                   </button>
                 </div>
@@ -1381,7 +1400,7 @@ export function InboxShell() {
             }}
           />
         </div>
-        {status ? <p className="statusLine">{status}</p> : null}
+        <p className="statusLine">{status ?? "Ready"}</p>
       </aside>
     </main>
   );

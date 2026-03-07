@@ -93,6 +93,34 @@ function parseFrom(rawFrom: string) {
   return match?.[0] ?? (rawFrom || "Unknown sender");
 }
 
+function compactPreview(value: string, maxLen = 180) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  if (compact.length <= maxLen) return compact;
+  return `${compact.slice(0, maxLen).trimEnd()}...`;
+}
+
+async function buildThreadSnippet(
+  gmail: ReturnType<typeof google.gmail>,
+  latestMessageId: string | undefined,
+  existingSnippet: string | undefined
+) {
+  const direct = compactPreview(existingSnippet ?? "");
+  if (direct) return direct;
+  if (!latestMessageId) return "";
+
+  try {
+    const message = await gmail.users.messages.get({
+      userId: "me",
+      id: latestMessageId,
+      format: "full"
+    });
+    return compactPreview(extractBody(message.data.payload) || message.data.snippet || "");
+  } catch {
+    return "";
+  }
+}
+
 export async function listMailLabels() {
   const connection = await getConnectedGmailClient();
   if (!connection) {
@@ -159,11 +187,13 @@ export async function listThreadsForClient(folder: MailFolder, query?: string, m
         : parsedDate.toISOString();
       const unread = Boolean(latest?.labelIds?.includes("UNREAD"));
 
+      const snippet = await buildThreadSnippet(gmail, latest?.id ?? undefined, thread.data.snippet ?? latest?.snippet ?? "");
+
       return {
         id: thread.data.id ?? "",
         subject,
         participants: [from],
-        snippet: thread.data.snippet ?? "",
+        snippet,
         lastMessageAt: timestamp,
         state: folder === "important" ? "priority" : folder,
         priority: {

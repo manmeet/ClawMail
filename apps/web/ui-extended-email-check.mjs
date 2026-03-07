@@ -117,7 +117,7 @@ try {
     await page.waitForTimeout(240);
   }
 
-  await page.getByRole('button', { name: /Unread/ }).first().click();
+  await page.getByRole('button', { name: /unread/i }).first().click();
   await page.waitForTimeout(250);
   await page.keyboard.press('u');
   await page.waitForTimeout(220);
@@ -127,7 +127,7 @@ try {
     if (!unreadMarked) {
       await page.locator(`.threadRow[data-thread-id="${activeThreadId}"]`).first().click();
       await page.waitForTimeout(220);
-      await page.getByRole('button', { name: /Unread/ }).first().click();
+      await page.getByRole('button', { name: /unread/i }).first().click();
       await page.waitForTimeout(240);
       await page.keyboard.press('u');
       await page.waitForTimeout(240);

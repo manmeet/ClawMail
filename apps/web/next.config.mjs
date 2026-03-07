@@ -11,12 +11,14 @@ function readGitBuildVersion() {
 }
 
 const clientVersion = process.env.NEXT_PUBLIC_CLIENT_VERSION ?? readGitBuildVersion();
+const clientBuiltAt = process.env.NEXT_PUBLIC_CLIENT_BUILT_AT ?? new Date().toISOString();
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
   env: {
-    NEXT_PUBLIC_CLIENT_VERSION: clientVersion
+    NEXT_PUBLIC_CLIENT_VERSION: clientVersion,
+    NEXT_PUBLIC_CLIENT_BUILT_AT: clientBuiltAt
   },
   async rewrites() {
     const target = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";

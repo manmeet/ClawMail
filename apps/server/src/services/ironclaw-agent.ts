@@ -18,10 +18,14 @@ export type IronclawAgentResponse = {
   raw: Record<string, unknown>;
 };
 
-const DEFAULT_AGENT_ID = process.env.AGENT_ID ?? "main";
+const DEFAULT_AGENT_ID = process.env.AGENT_ID?.trim() || undefined;
 const DEFAULT_TIMEOUT_SECONDS = Number(process.env.AGENT_TIMEOUT_SECONDS ?? 120);
 const DEFAULT_CLI_BIN = process.env.AGENT_CLI_BIN;
 const MAX_STDIO_BUFFER = 12 * 1024 * 1024;
+
+function toCliSessionId(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
 
 function parseFirstJsonObject(text: string): Record<string, unknown> {
   const trimmed = text.trim();
@@ -76,11 +80,20 @@ function extractModel(payload: Record<string, unknown>): string | null {
   return typeof model === "string" ? model : null;
 }
 
+function buildParsedResponse(payload: Record<string, unknown>): IronclawAgentResponse {
+  return {
+    assistantMessage: extractAssistantText(payload),
+    sessionId: extractSessionId(payload),
+    model: extractModel(payload),
+    raw: payload
+  };
+}
+
 export async function runIronclawAgent(request: IronclawAgentRequest): Promise<IronclawAgentResponse> {
   const cliCandidates = [request.cliBin, DEFAULT_CLI_BIN, "openclaw", "ironclaw"].filter(
     (item, index, all): item is string => typeof item === "string" && item.trim().length > 0 && all.indexOf(item) === index
   );
-  const agentId = request.agentId ?? DEFAULT_AGENT_ID;
+  const agentId = request.agentId?.trim() || DEFAULT_AGENT_ID;
   const timeoutSeconds =
     typeof request.timeoutSeconds === "number" && Number.isFinite(request.timeoutSeconds)
       ? request.timeoutSeconds
@@ -88,16 +101,18 @@ export async function runIronclawAgent(request: IronclawAgentRequest): Promise<I
 
   const args = [
     "agent",
-    "--agent",
-    agentId,
-    "--session-key",
-    request.sessionKey,
+    "--session-id",
+    toCliSessionId(request.sessionKey),
     "--message",
     request.message,
     "--json",
     "--timeout",
     String(timeoutSeconds)
   ];
+
+  if (agentId && agentId !== "main") {
+    args.splice(1, 0, "--agent", agentId);
+  }
 
   if (cliCandidates.length === 0) {
     throw new Error("Agent CLI not configured. Set AGENT_CLI_BIN to your OpenClaw executable.");
@@ -112,30 +127,53 @@ export async function runIronclawAgent(request: IronclawAgentRequest): Promise<I
       });
 
       const payload = parseFirstJsonObject(stdout);
-      const assistantMessage = extractAssistantText(payload);
       if (stderr.trim()) {
         console.warn(`[agent:${cliBin}] stderr: ${stderr.trim()}`);
       }
 
-      return {
-        assistantMessage,
-        sessionId: extractSessionId(payload),
-        model: extractModel(payload),
-        raw: payload
-      };
+      return buildParsedResponse(payload);
     } catch (error) {
       if (error && typeof error === "object") {
         const err = error as {
-          code?: string;
+          code?: string | number;
           message?: string;
           stdout?: string;
           stderr?: string;
+          signal?: string;
+          killed?: boolean;
+          cmd?: string;
         };
         if (err.code === "ENOENT") {
           lastErrorDetails = `Missing CLI '${cliBin}'`;
           continue;
         }
-        const details = [err.message, err.stderr, err.stdout].filter(Boolean).join(" | ");
+        const jsonCandidate = [err.stdout, err.stderr].find((value) => {
+          if (typeof value !== "string" || !value.trim()) return false;
+          try {
+            parseFirstJsonObject(value);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        if (jsonCandidate) {
+          return buildParsedResponse(parseFirstJsonObject(jsonCandidate));
+        }
+
+        const timedOut =
+          err.signal === "SIGTERM" &&
+          err.killed === true &&
+          typeof err.message === "string" &&
+          err.message.includes("Command failed");
+        const detailParts = [
+          timedOut ? `Timed out after ${timeoutSeconds}s` : err.message,
+          typeof err.code !== "undefined" ? `code=${String(err.code)}` : "",
+          err.signal ? `signal=${err.signal}` : "",
+          err.cmd ? `cmd=${err.cmd}` : "",
+          err.stderr,
+          err.stdout
+        ].filter(Boolean);
+        const details = detailParts.join(" | ");
         throw new Error(`Failed to run ${cliBin} agent: ${details}`);
       }
       throw error;
