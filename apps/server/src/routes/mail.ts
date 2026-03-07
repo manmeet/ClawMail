@@ -42,9 +42,10 @@ mailRouter.get("/mail/threads", async (req, res) => {
 
   const query = typeof req.query.q === "string" ? req.query.q : undefined;
   const maxResults = Number(req.query.maxResults ?? 35);
+  const pageToken = typeof req.query.pageToken === "string" ? req.query.pageToken : undefined;
 
   try {
-    const result = await listThreadsForClient(parsedFolder.data, query, maxResults);
+    const result = await listThreadsForClient(parsedFolder.data, query, maxResults, pageToken);
     return res.json(result);
   } catch (error) {
     return res.status(400).json({ error: error instanceof Error ? error.message : "Failed to list threads" });

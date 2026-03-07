@@ -20,6 +20,36 @@ type ComposePayload = {
   body: string;
 };
 
+type ThreadListItem = {
+  id: string;
+  subject: string;
+  participants: string[];
+  snippet: string;
+  lastMessageAt: string;
+  state: MailFolder | "priority";
+  priority: {
+    score: number;
+    level: "P2" | "P3";
+    reasons: string[];
+  };
+  unread: boolean;
+};
+
+type ThreadListResponse = {
+  source: "gmail";
+  items: ThreadListItem[];
+  nextPageToken?: string;
+};
+
+type ThreadListCacheEntry = {
+  expiresAt: number;
+  pages: Map<string, ThreadListResponse>;
+};
+
+const THREAD_LIST_CACHE_TTL_MS = 30_000;
+const THREAD_LIST_CONCURRENCY = 6;
+const threadListCache = new Map<string, ThreadListCacheEntry>();
+
 function isInsufficientScopeError(error: unknown) {
   const message =
     error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error);
@@ -100,25 +130,26 @@ function compactPreview(value: string, maxLen = 180) {
   return `${compact.slice(0, maxLen).trimEnd()}...`;
 }
 
-async function buildThreadSnippet(
-  gmail: ReturnType<typeof google.gmail>,
-  latestMessageId: string | undefined,
-  existingSnippet: string | undefined
+async function mapWithConcurrency<TInput, TOutput>(
+  values: TInput[],
+  concurrency: number,
+  mapper: (value: TInput, index: number) => Promise<TOutput>
 ) {
-  const direct = compactPreview(existingSnippet ?? "");
-  if (direct) return direct;
-  if (!latestMessageId) return "";
+  const limit = Math.max(1, concurrency);
+  const results = new Array<TOutput>(values.length);
+  let cursor = 0;
 
-  try {
-    const message = await gmail.users.messages.get({
-      userId: "me",
-      id: latestMessageId,
-      format: "full"
-    });
-    return compactPreview(extractBody(message.data.payload) || message.data.snippet || "");
-  } catch {
-    return "";
-  }
+  const worker = async () => {
+    while (true) {
+      const current = cursor;
+      cursor += 1;
+      if (current >= values.length) return;
+      results[current] = await mapper(values[current], current);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => worker()));
+  return results;
 }
 
 export async function listMailLabels() {
@@ -148,33 +179,51 @@ export async function listMailLabels() {
   };
 }
 
-export async function listThreadsForClient(folder: MailFolder, query?: string, maxResults = 35) {
+export async function listThreadsForClient(folder: MailFolder, query?: string, maxResults = 35, pageToken?: string) {
   const connection = await getConnectedGmailClient();
 
   if (!connection) {
     return {
       source: "mock" as const,
-      items: listMailThreads(folder, query)
+      items: listMailThreads(folder, query),
+      nextPageToken: undefined
     };
   }
 
+  const safeMaxResults = Math.max(1, Math.min(maxResults, 50));
+  const cacheKey = [connection.connectedEmail ?? "me", folder, query ?? "", safeMaxResults].join(":");
+  const pageKey = pageToken ?? "__first_page__";
+  const now = Date.now();
+  const cached = threadListCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    const cachedPage = cached.pages.get(pageKey);
+    if (cachedPage) {
+      console.info(`[gmail] listThreadsForClient cache hit key=${cacheKey} page=${pageKey}`);
+      return cachedPage;
+    }
+  }
+
   const gmail = google.gmail({ version: "v1", auth: connection.client });
+  const listStartMs = Date.now();
   const list = await gmail.users.threads.list({
     userId: "me",
     labelIds: folderToLabel(folder),
-    maxResults: Math.max(1, Math.min(maxResults, 50)),
-    q: query || undefined
+    maxResults: safeMaxResults,
+    q: query || undefined,
+    pageToken: pageToken || undefined
   });
+  console.info(`[gmail] listThreadsForClient list fetch ${Date.now() - listStartMs}ms ids=${list.data.threads?.length ?? 0}`);
 
   const threadIds = list.data.threads ?? [];
-  const items = await Promise.all(
-    threadIds.map(async (threadRef) => {
+  const items: ThreadListItem[] = await mapWithConcurrency(threadIds, THREAD_LIST_CONCURRENCY, async (threadRef): Promise<ThreadListItem> => {
+      const threadStartMs = Date.now();
       const thread = await gmail.users.threads.get({
         userId: "me",
         id: threadRef.id ?? "",
         format: "metadata",
         metadataHeaders: ["Subject", "From", "Date"]
       });
+      console.info(`[gmail] thread metadata fetch id=${threadRef.id ?? "unknown"} ${Date.now() - threadStartMs}ms`);
 
       const latest = thread.data.messages?.[thread.data.messages.length - 1];
       const headers = latest?.payload?.headers ?? [];
@@ -186,8 +235,7 @@ export async function listThreadsForClient(folder: MailFolder, query?: string, m
         ? new Date(Number(latest?.internalDate ?? Date.now())).toISOString()
         : parsedDate.toISOString();
       const unread = Boolean(latest?.labelIds?.includes("UNREAD"));
-
-      const snippet = await buildThreadSnippet(gmail, latest?.id ?? undefined, thread.data.snippet ?? latest?.snippet ?? "");
+      const snippet = compactPreview(thread.data.snippet ?? latest?.snippet ?? "");
 
       return {
         id: thread.data.id ?? "",
@@ -203,13 +251,25 @@ export async function listThreadsForClient(folder: MailFolder, query?: string, m
         },
         unread
       };
-    })
-  );
+    });
 
-  return {
+  const response: ThreadListResponse = {
     source: "gmail" as const,
-    items
+    items,
+    nextPageToken: list.data.nextPageToken ?? undefined
   };
+
+  const freshCacheEntry: ThreadListCacheEntry = cached && cached.expiresAt > now
+    ? cached
+    : {
+      expiresAt: Date.now() + THREAD_LIST_CACHE_TTL_MS,
+      pages: new Map<string, ThreadListResponse>()
+    };
+  freshCacheEntry.expiresAt = Date.now() + THREAD_LIST_CACHE_TTL_MS;
+  freshCacheEntry.pages.set(pageKey, response);
+  threadListCache.set(cacheKey, freshCacheEntry);
+
+  return response;
 }
 
 export async function getThreadForClient(threadId: string) {
