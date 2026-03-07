@@ -39,12 +39,23 @@ const THREAD_RELATED_PATTERNS = [
   /\bmessage above\b/i
 ];
 
+const THREAD_MUTATING_PATTERNS = [/\bcompose\b/i, /\bsend\b/i, /\breply\b/i, /\brespond\b/i, /\bdraft\b/i];
+
 type ThreadContext = {
   id: string;
   subject: string;
   participants: string[];
   messages: Array<{ sender: string; body: string; timestamp: string }>;
 };
+
+type CachedThreadContext = {
+  context: ThreadContext;
+  expiresAt: number;
+};
+
+const THREAD_CONTEXT_CACHE_TTL_MS = 30_000;
+const MAX_CONTEXT_MESSAGES = 3;
+const threadContextCache = new Map<string, CachedThreadContext>();
 
 function truncate(value: string, max = 400): string {
   if (value.length <= max) return value;
@@ -59,16 +70,47 @@ function isThreadRelatedMessage(message: string): boolean {
   return THREAD_RELATED_PATTERNS.some((pattern) => pattern.test(message));
 }
 
+function isThreadMutatingMessage(message: string): boolean {
+  return THREAD_MUTATING_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 function buildSessionKey(threadId: string | undefined, mailboxAccount: string | undefined): string {
   const accountKey = normalizeSessionToken(mailboxAccount ?? "default");
   if (threadId) return `clawmail:${accountKey}:thread:${threadId}`;
   return `clawmail:${accountKey}:inbox`;
 }
 
+function buildThreadContextCacheKey(sessionKey: string, threadId: string): string {
+  return `${sessionKey}:thread-context:${threadId}`;
+}
+
+function getCachedThreadContext(cacheKey: string): ThreadContext | null {
+  const cached = threadContextCache.get(cacheKey);
+  if (!cached) return null;
+
+  if (cached.expiresAt <= Date.now()) {
+    threadContextCache.delete(cacheKey);
+    return null;
+  }
+
+  return cached.context;
+}
+
+function setCachedThreadContext(cacheKey: string, context: ThreadContext): void {
+  threadContextCache.set(cacheKey, {
+    context,
+    expiresAt: Date.now() + THREAD_CONTEXT_CACHE_TTL_MS
+  });
+}
+
+function invalidateThreadContextCache(cacheKey: string): void {
+  threadContextCache.delete(cacheKey);
+}
+
 function toThreadContext(data: Record<string, unknown>): ThreadContext {
   const messages = Array.isArray(data.messages) ? data.messages : [];
   const normalizedMessages = messages
-    .slice(-3)
+    .slice(-MAX_CONTEXT_MESSAGES)
     .map((message) => {
       if (!message || typeof message !== "object") return null;
       const sender = (message as Record<string, unknown>).sender;
@@ -122,23 +164,43 @@ agentChatRouter.post("/agent/chat", async (req, res) => {
   const autoThreadDetect = parsed.data.autoThreadDetect ?? true;
   const allowThreadAccess = parsed.data.allowThreadAccess ?? false;
   const threadId = parsed.data.threadId;
+  const trimmedMessage = parsed.data.message.trim();
+  const threadMutationRequested = isThreadMutatingMessage(trimmedMessage);
+  const sessionKey = buildSessionKey(threadId, parsed.data.mailboxAccount);
+  const threadContextCacheKey = threadId ? buildThreadContextCacheKey(sessionKey, threadId) : null;
 
-  const threadIntentDetected = autoThreadDetect && isThreadRelatedMessage(parsed.data.message);
+  const threadIntentDetected = autoThreadDetect && isThreadRelatedMessage(trimmedMessage);
   const shouldAttachThread = Boolean(threadId) && (allowThreadAccess || threadIntentDetected);
 
   let threadAttachReason = "Thread context not requested.";
+  let threadAttachSource: "none" | "cache" | "fresh fetch" = "none";
   let threadContext: ThreadContext | null = null;
 
-  if (shouldAttachThread && threadId) {
+  if (threadMutationRequested && threadContextCacheKey) {
+    invalidateThreadContextCache(threadContextCacheKey);
+  }
+
+  if (shouldAttachThread && threadId && threadContextCacheKey) {
     try {
-      const threadResponse = await getThreadForClient(threadId);
-      if (!threadResponse) {
-        threadAttachReason = "Thread requested but not found.";
-      } else {
-        threadContext = toThreadContext(threadResponse.item as Record<string, unknown>);
+      const cachedContext = getCachedThreadContext(threadContextCacheKey);
+      if (cachedContext) {
+        threadContext = cachedContext;
+        threadAttachSource = "cache";
         threadAttachReason = allowThreadAccess
           ? "Thread context attached by explicit request."
           : "Thread context auto-attached from thread-related message.";
+      } else {
+        const threadResponse = await getThreadForClient(threadId);
+        if (!threadResponse) {
+          threadAttachReason = "Thread requested but not found.";
+        } else {
+          threadContext = toThreadContext(threadResponse.item as Record<string, unknown>);
+          setCachedThreadContext(threadContextCacheKey, threadContext);
+          threadAttachSource = "fresh fetch";
+          threadAttachReason = allowThreadAccess
+            ? "Thread context attached by explicit request."
+            : "Thread context auto-attached from thread-related message.";
+        }
       }
     } catch (error) {
       threadAttachReason = error instanceof Error ? `Thread attach failed: ${error.message}` : "Thread attach failed.";
@@ -147,8 +209,15 @@ agentChatRouter.post("/agent/chat", async (req, res) => {
     threadAttachReason = "No open thread selected.";
   }
 
-  const sessionKey = buildSessionKey(threadId, parsed.data.mailboxAccount);
-  const prompt = buildPrompt(parsed.data.message.trim(), threadContext);
+  if (threadAttachSource !== "none") {
+    console.info("[agent-chat] thread context source", {
+      source: threadAttachSource,
+      threadId,
+      sessionKey
+    });
+  }
+
+  const prompt = buildPrompt(trimmedMessage, threadContext);
 
   try {
     const result = await runIronclawAgent({
@@ -162,7 +231,8 @@ agentChatRouter.post("/agent/chat", async (req, res) => {
       model: result.model,
       sessionKey,
       threadAttached: Boolean(threadContext),
-      threadAttachReason
+      threadAttachReason,
+      threadAttachSource
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Agent chat failed";
