@@ -714,11 +714,7 @@ export function InboxShell() {
 
       const threadId = activeChatThreadId;
       const createdAt = new Date().toISOString();
-      const threadSessionHasAttachedContext = agentMessages.some((item) => item.threadAttached);
-      const allowThreadAccess = Boolean(
-        options?.forceThreadAccess === true ||
-          (threadId && (threadSessionHasAttachedContext || isDraftRefinementMessage(trimmed)))
-      );
+      const allowThreadAccess = Boolean(options?.forceThreadAccess === true || threadId);
 
       appendToActiveSession({
         id: nextMessageId(),
