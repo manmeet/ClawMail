@@ -429,6 +429,10 @@ export function InboxShell() {
       const id = openedThreadId ?? selectedThread?.id;
       if (!id) return;
       const currentIndex = threads.findIndex((thread) => thread.id === id);
+      const nextThread =
+        currentIndex >= 0
+          ? threads[currentIndex + 1] ?? threads[currentIndex - 1] ?? null
+          : null;
       setIsWorking(true);
       setStatus(null);
       try {
@@ -449,6 +453,10 @@ export function InboxShell() {
           });
         }
         if (action === "archive" || action === "trash" || action === "snooze") {
+          if (openedThreadId && nextThread?.id) {
+            void openThread(nextThread.id);
+            return;
+          }
           closeOpenedThread();
           return;
         }
@@ -462,7 +470,7 @@ export function InboxShell() {
         setIsWorking(false);
       }
     },
-    [closeOpenedThread, openedThreadId, refreshThreads, selectedThread?.id, threads]
+    [closeOpenedThread, openThread, openedThreadId, refreshThreads, selectedThread?.id, threads]
   );
 
   const saveDraft = useCallback(async () => {
