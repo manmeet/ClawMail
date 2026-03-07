@@ -1,23 +1,23 @@
 # ClawMail
 
-ClawMail is a keyboard-first executive inbox client with a built-in agent panel.
+ClawMail is building an **executive assistant for everyone**: a clean, polished mail UI in front, with an OpenClaw-powered backend agent that helps people operate at superhuman speed.
 
-Current status:
-- Functional email client shell (list, open thread, reply dock, compose, archive/read/snooze actions)
+## Vision
+Email is where work happens, but most inbox tools still make people do everything manually. ClawMail combines:
+
+- **A focused, keyboard-first inbox experience** for fast triage and action.
+- **An AI agent backend (OpenClaw)** for planning, execution, and policy-aware automation.
+- **A human-in-the-loop control model** so users stay in charge while moving faster.
+
+Our goal is simple: **make everyone superhuman in email workflows**.
+
+## What Exists Today
+- Functional inbox client shell (list, open thread, reply dock, compose, archive/read/snooze actions)
 - Gmail OAuth + sync integration
 - API/server scaffolding for OpenClaw orchestration and policy/audit pipeline
-- High-coverage Playwright smoke suites for core UI interactions
+- Playwright smoke suites for core UI interactions
 
-## Repository Structure
-- `apps/web`: Next.js + React frontend
-- `apps/server`: Express + TypeScript backend
-- `api/openapi.yaml`: API contract (OpenAPI-style)
-- `docs/ia-route-component-tree.md`: IA and component tree draft
-- `docs/architecture.md`: architecture and runtime flow
-- `docs/setup.md`: local setup and operations
-- `docs/roadmap.md`: what remains to ship production-grade ClawMail
-
-## Product Capabilities (Current)
+## Product Experience
 - Inbox-first, keyboard-driven workflow:
   - `j/k` navigate, `Enter/o` open, `u` back, `r/a` reply, `e` archive, `/` search
   - `Cmd/Ctrl+K` command palette
@@ -27,17 +27,21 @@ Current status:
 - Gmail connect/sync entry points
 - Draft/send flows (with graceful fallback behavior)
 
-## Tech Stack
-- Frontend:
-  - Next.js 14
-  - React 18
-  - TypeScript
-  - Playwright (UI smoke tests)
-- Backend:
-  - Node.js + Express
-  - TypeScript
-  - Zod request validation
-  - Google APIs (OAuth + Gmail)
+## Architecture at a Glance
+- **Frontend (`apps/web`)**: Next.js + React + TypeScript
+- **Backend (`apps/server`)**: Express + TypeScript + Zod
+- **Contract (`api/openapi.yaml`)**: OpenAPI-style API definition
+- **Docs (`docs/`)**: setup, architecture, roadmap, deployment runbooks
+
+See `docs/architecture.md` for full system boundaries and runtime flow.
+
+## Repository Structure
+- `apps/web` — Next.js mail client
+- `apps/server` — API server and integration/orchestration layer
+- `api/openapi.yaml` — API contract
+- `docs/setup.md` — local setup and operations
+- `docs/architecture.md` — architecture and runtime flow
+- `docs/roadmap.md` — prioritized path to production
 
 ## Quick Start
 Use the detailed guide: `docs/setup.md`.
@@ -69,7 +73,7 @@ npm run dev
 # open http://localhost:3000
 ```
 
-## Test Suites
+## Testing
 From `apps/web`:
 
 ```bash
@@ -78,32 +82,24 @@ node ui-full-email-check.mjs
 node ui-extended-email-check.mjs
 ```
 
-What they cover:
-- Fake-thread deterministic send-in-thread behavior
-- Full end-to-end UI smoke (open/reply/send/archive/scroll lock/command palette)
-- Extended regression checks (drawer/scrim, `a` reply-all intent, keyboard send, unread state)
+Coverage includes:
+- deterministic fake-thread send-in-thread behavior
+- end-to-end UI smoke checks (open/reply/send/archive/scroll lock/command palette)
+- regression checks (drawer/scrim, reply-all intent, keyboard send, unread state)
 
-## API
-Primary contract file: `api/openapi.yaml`.
+## API & Backend Surface
+Primary contract: `api/openapi.yaml`.
 
-Implemented backend routes are under `apps/server/src/routes` and include:
-- Inbox/thread legacy routes
+Implemented backend route groups in `apps/server/src/routes` include:
+- inbox/thread legacy routes
 - Gmail OAuth/connectors/sync routes
-- Mail routes for threads, drafts, send, and actions
-- Policy/approval/audit/task scaffolding
+- mail routes for threads, drafts, send, and actions
+- policy/approval/audit/task scaffolding
 
-## Architecture
-See `docs/architecture.md` for:
-- frontend and backend component boundaries
-- state/data flow
-- Gmail integration model
-- policy/audit model
-- known tradeoffs and constraints
-
-## What’s Left
-See `docs/roadmap.md` for prioritized remaining work, including:
+## Roadmap
+See `docs/roadmap.md` for what remains to ship production-grade ClawMail, including:
 - production auth/session model
-- robust connector/account model
+- robust multi-account connector model
 - richer thread fidelity and pagination
 - full OpenClaw action execution loop
 - reliability hardening and observability
