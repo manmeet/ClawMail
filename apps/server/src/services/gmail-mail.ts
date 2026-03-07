@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { gmail_v1, google } from "googleapis";
 import { getConnectedGmailClient } from "./gmail-auth.js";
 import {
   applyThreadAction,
@@ -8,6 +8,51 @@ import {
   sendMailDraft,
   sendMailMessage
 } from "./repositories.js";
+
+const THREAD_CACHE_TTL_MS = 60_000;
+
+
+type ThreadFreshnessMarker = {
+  historyId?: string;
+  latestMessageId?: string;
+  latestInternalDate?: string;
+};
+
+type NormalizedThreadDetail = {
+  id: string;
+  subject: string;
+  participants: string[];
+  snippet: string;
+  lastMessageAt: string;
+  state: string;
+  priority: {
+    score: number;
+    level: string;
+    reasons: string[];
+  };
+  messages: Array<{
+    id: string;
+    sender: string;
+    body: string;
+    timestamp: string;
+    labelIds: string[];
+  }>;
+};
+
+type CachedThreadEntry = {
+  normalized: NormalizedThreadDetail;
+  marker: ThreadFreshnessMarker;
+  expiresAt: number;
+  refreshInFlight?: Promise<void>;
+};
+
+const threadDetailCache = new Map<string, CachedThreadEntry>();
+const threadCacheStats = {
+  hits: 0,
+  misses: 0,
+  staleReturns: 0,
+  invalidations: 0
+};
 
 type MailFolder = "inbox" | "important" | "sent" | "drafts" | "trash" | "spam" | "snoozed" | "all";
 
@@ -98,6 +143,101 @@ function compactPreview(value: string, maxLen = 180) {
   if (!compact) return "";
   if (compact.length <= maxLen) return compact;
   return `${compact.slice(0, maxLen).trimEnd()}...`;
+}
+
+function buildThreadCacheKey(account: string | undefined, threadId: string) {
+  return `${account ?? "unknown"}:${threadId}`;
+}
+
+function extractFreshnessMarker(thread: gmail_v1.Schema$Thread): ThreadFreshnessMarker {
+  const latestMessage = thread.messages?.[thread.messages.length - 1];
+  return {
+    historyId: thread.historyId ?? undefined,
+    latestMessageId: latestMessage?.id ?? undefined,
+    latestInternalDate: latestMessage?.internalDate ?? undefined
+  };
+}
+
+function sameFreshnessMarker(left: ThreadFreshnessMarker, right: ThreadFreshnessMarker) {
+  return left.historyId === right.historyId
+    && left.latestMessageId === right.latestMessageId
+    && left.latestInternalDate === right.latestInternalDate;
+}
+
+function normalizeThreadDetail(threadId: string, thread: gmail_v1.Schema$Thread): NormalizedThreadDetail | null {
+  const messages = thread.messages ?? [];
+  if (messages.length === 0) return null;
+
+  const latest = messages[messages.length - 1];
+  const latestHeaders = latest.payload?.headers ?? [];
+  const subject = getHeader(latestHeaders, "Subject") || "(No subject)";
+  const from = parseFrom(getHeader(latestHeaders, "From"));
+
+  return {
+    id: thread.id ?? threadId,
+    subject,
+    participants: [from],
+    snippet: thread.snippet ?? "",
+    lastMessageAt: new Date(Number(latest.internalDate ?? Date.now())).toISOString(),
+    state: "inbox",
+    priority: { score: 0.6, level: "P2", reasons: ["Live Gmail thread"] },
+    messages: messages.map((message: gmail_v1.Schema$Message, index: number) => {
+      const headers = message.payload?.headers ?? [];
+      const sender = parseFrom(getHeader(headers, "From"));
+      const body = extractBody(message.payload) || message.snippet || "";
+      return {
+        id: message.id ?? `${threadId}-${index}`,
+        sender,
+        body,
+        timestamp: new Date(Number(message.internalDate ?? Date.now())).toISOString(),
+        labelIds: message.labelIds ?? []
+      };
+    })
+  };
+}
+
+function logThreadCacheStats(event: string, key: string) {
+  console.info(
+    `[gmail-thread-cache] ${event} key=${key} hits=${threadCacheStats.hits} misses=${threadCacheStats.misses} staleReturns=${threadCacheStats.staleReturns} invalidations=${threadCacheStats.invalidations}`
+  );
+}
+
+function invalidateThreadCache(account: string | undefined, threadId: string | undefined) {
+  if (!threadId) return;
+  const key = buildThreadCacheKey(account, threadId);
+  if (threadDetailCache.delete(key)) {
+    threadCacheStats.invalidations += 1;
+    logThreadCacheStats("invalidate", key);
+  }
+}
+
+async function refreshThreadCacheEntry(
+  gmail: ReturnType<typeof google.gmail>,
+  account: string | undefined,
+  threadId: string,
+  existing: CachedThreadEntry
+) {
+  const key = buildThreadCacheKey(account, threadId);
+  const metadataThread = await gmail.users.threads.get({ userId: "me", id: threadId, format: "metadata" });
+  const latestMarker = extractFreshnessMarker(metadataThread.data);
+
+  if (sameFreshnessMarker(existing.marker, latestMarker)) {
+    existing.expiresAt = Date.now() + THREAD_CACHE_TTL_MS;
+    return;
+  }
+
+  const fullThread = await gmail.users.threads.get({ userId: "me", id: threadId, format: "full" });
+  const normalized = normalizeThreadDetail(threadId, fullThread.data);
+  if (!normalized) {
+    threadDetailCache.delete(key);
+    return;
+  }
+
+  threadDetailCache.set(key, {
+    normalized,
+    marker: extractFreshnessMarker(fullThread.data),
+    expiresAt: Date.now() + THREAD_CACHE_TTL_MS
+  });
 }
 
 async function buildThreadSnippet(
@@ -225,38 +365,59 @@ export async function getThreadForClient(threadId: string) {
   }
 
   const gmail = google.gmail({ version: "v1", auth: connection.client });
-  const thread = await gmail.users.threads.get({ userId: "me", id: threadId, format: "full" });
-  const messages = thread.data.messages ?? [];
-  if (messages.length === 0) return null;
+  const cacheKey = buildThreadCacheKey(connection.connectedEmail, threadId);
+  const now = Date.now();
+  const cached = threadDetailCache.get(cacheKey);
 
-  const latest = messages[messages.length - 1];
-  const latestHeaders = latest.payload?.headers ?? [];
-  const subject = getHeader(latestHeaders, "Subject") || "(No subject)";
-  const from = parseFrom(getHeader(latestHeaders, "From"));
+  if (cached && cached.expiresAt > now) {
+    threadCacheStats.hits += 1;
+    logThreadCacheStats("hit", cacheKey);
+    return {
+      source: "gmail" as const,
+      item: cached.normalized
+    };
+  }
+
+  if (cached) {
+    threadCacheStats.hits += 1;
+    threadCacheStats.staleReturns += 1;
+    logThreadCacheStats("stale-return", cacheKey);
+
+    if (!cached.refreshInFlight) {
+      cached.refreshInFlight = refreshThreadCacheEntry(gmail, connection.connectedEmail, threadId, cached)
+        .catch((error) => {
+          console.warn(`[gmail-thread-cache] background-refresh-failed key=${cacheKey}`, error);
+        })
+        .finally(() => {
+          const latest = threadDetailCache.get(cacheKey);
+          if (latest) {
+            delete latest.refreshInFlight;
+          }
+        });
+    }
+
+    return {
+      source: "gmail" as const,
+      item: cached.normalized
+    };
+  }
+
+  threadCacheStats.misses += 1;
+  logThreadCacheStats("miss", cacheKey);
+
+  const thread = await gmail.users.threads.get({ userId: "me", id: threadId, format: "full" });
+  const normalized = normalizeThreadDetail(threadId, thread.data);
+  if (!normalized) return null;
+
+  threadDetailCache.set(cacheKey, {
+    normalized,
+    marker: extractFreshnessMarker(thread.data),
+    expiresAt: Date.now() + THREAD_CACHE_TTL_MS
+  });
 
   return {
     source: "gmail" as const,
-    item: {
-      id: thread.data.id ?? threadId,
-      subject,
-      participants: [from],
-      snippet: thread.data.snippet ?? "",
-      lastMessageAt: new Date(Number(latest.internalDate ?? Date.now())).toISOString(),
-      state: "inbox",
-      priority: { score: 0.6, level: "P2", reasons: ["Live Gmail thread"] },
-      messages: messages.map((message, index) => {
-        const headers = message.payload?.headers ?? [];
-        const sender = parseFrom(getHeader(headers, "From"));
-        const body = extractBody(message.payload) || message.snippet || "";
-        return {
-          id: message.id ?? `${threadId}-${index}`,
-          sender,
-          body,
-          timestamp: new Date(Number(message.internalDate ?? Date.now())).toISOString(),
-          labelIds: message.labelIds ?? []
-        };
-      })
-    }
+    item: normalized
   };
 }
 
@@ -284,6 +445,7 @@ export async function createDraftForClient(payload: ComposePayload) {
       }
     });
 
+    invalidateThreadCache(connection.connectedEmail, payload.threadId);
     return {
       source: "gmail" as const,
       item: {
@@ -321,6 +483,7 @@ export async function sendDraftForClient(draftId: string) {
   const gmail = google.gmail({ version: "v1", auth: connection.client });
   try {
     const sent = await gmail.users.drafts.send({ userId: "me", requestBody: { id: draftId } });
+    invalidateThreadCache(connection.connectedEmail, sent.data.threadId ?? undefined);
     return {
       source: "gmail" as const,
       item: {
@@ -360,6 +523,7 @@ export async function sendMessageForClient(payload: ComposePayload) {
         raw
       }
     });
+    invalidateThreadCache(connection.connectedEmail, sent.data.threadId ?? payload.threadId);
 
     return {
       source: "gmail" as const,
@@ -411,6 +575,7 @@ export async function applyThreadActionForClient(threadId: string, action: strin
         removeLabelIds
       }
     });
+    invalidateThreadCache(connection.connectedEmail, threadId);
 
     return {
       source: "gmail" as const,
