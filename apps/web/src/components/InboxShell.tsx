@@ -111,6 +111,13 @@ type ThreadDraftCacheEntry = {
   body: string;
 };
 
+type ThreadDetailCacheEntry = {
+  timestamp: number;
+  payload: MailThreadDetail;
+};
+
+const THREAD_DETAIL_CACHE_TTL_MS = 60_000;
+
 function nextMessageId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -239,6 +246,7 @@ export function InboxShell() {
   const [isAgentWorking, setIsAgentWorking] = useState(false);
   const [agentSessionMessages, setAgentSessionMessages] = useState<Record<string, AgentPaneMessage[]>>({});
   const [threadDraftCache, setThreadDraftCache] = useState<Record<string, ThreadDraftCacheEntry>>({});
+  const [threadDetailCache, setThreadDetailCache] = useState<Record<string, ThreadDetailCacheEntry>>({});
 
   const searchRef = useRef<HTMLInputElement | null>(null);
   const replyRef = useRef<HTMLTextAreaElement | null>(null);
@@ -319,18 +327,22 @@ export function InboxShell() {
     container.scrollTop = container.scrollHeight;
   }, []);
 
-  const openThread = useCallback(async (threadId: string, options?: { openComposer?: boolean; replyAll?: boolean }) => {
-    const reqId = ++openThreadReqRef.current;
-    setOpenedThreadId(threadId);
-    setThreadError(null);
-    setStatus(null);
-    setIsLoadingThread(true);
-    try {
-      const result = await getMailThread(threadId);
-      if (reqId !== openThreadReqRef.current) return;
-      setThreadDetail(result.item);
+  const getCachedThreadDetail = useCallback(
+    (threadId: string) => {
+      const entry = threadDetailCache[threadId];
+      if (!entry) return null;
+      if (Date.now() - entry.timestamp > THREAD_DETAIL_CACHE_TTL_MS) return null;
+      return entry.payload;
+    },
+    [threadDetailCache]
+  );
+
+  const hydrateThreadView = useCallback(
+    (item: MailThreadDetail, options?: { threadId?: string; openComposer?: boolean; replyAll?: boolean }) => {
+      const threadId = options?.threadId ?? item.id;
+      setThreadDetail(item);
       setThreads((prev) => prev.map((thread) => (thread.id === threadId ? { ...thread, unread: false } : thread)));
-      const messages = result.item.messages ?? [];
+      const messages = item.messages ?? [];
       const unreadMessageIds = messages
         .filter((message) => (message.labelIds ?? []).includes("UNREAD"))
         .map((message) => message.id);
@@ -343,10 +355,10 @@ export function InboxShell() {
       });
       setExpandedQuotedBodies({});
 
-      const replyDefaults = buildReplyDefaults(result.item, gmailAccount, Boolean(options?.replyAll));
+      const replyDefaults = buildReplyDefaults(item, gmailAccount, Boolean(options?.replyAll));
       const cachedDraft = threadDraftCache[threadId];
       setComposePayload({
-        threadId: result.item.id,
+        threadId: item.id,
         to: cachedDraft?.to ?? replyDefaults.to,
         cc: cachedDraft?.cc ?? [],
         bcc: cachedDraft?.bcc ?? [],
@@ -355,17 +367,80 @@ export function InboxShell() {
       });
       setComposeOpen(Boolean(options?.openComposer || cachedDraft));
       setComposeDraftId(cachedDraft?.draftId ?? null);
-      void applyMailThreadAction(threadId, "mark_read").catch(() => {});
       window.setTimeout(scrollThreadToBottom, 20);
+    },
+    [gmailAccount, scrollThreadToBottom, threadDraftCache]
+  );
+
+  const prefetchThreadDetail = useCallback(
+    async (threadId: string) => {
+      if (getCachedThreadDetail(threadId)) return;
+      try {
+        const result = await getMailThread(threadId);
+        setThreadDetailCache((prev) => ({
+          ...prev,
+          [threadId]: {
+            timestamp: Date.now(),
+            payload: result.item
+          }
+        }));
+      } catch {
+        // Ignore prefetch errors to keep navigation fluid.
+      }
+    },
+    [getCachedThreadDetail]
+  );
+
+  const prefetchAdjacentThreadDetails = useCallback(
+    (threadId: string) => {
+      const index = threads.findIndex((thread) => thread.id === threadId);
+      if (index < 0) return;
+      const adjacentIds = [threads[index - 1]?.id, threads[index + 1]?.id].filter((id): id is string => Boolean(id));
+      adjacentIds.forEach((id) => {
+        void prefetchThreadDetail(id);
+      });
+    },
+    [prefetchThreadDetail, threads]
+  );
+
+  const openThread = useCallback(async (threadId: string, options?: { openComposer?: boolean; replyAll?: boolean }) => {
+    const reqId = ++openThreadReqRef.current;
+    setOpenedThreadId(threadId);
+    setThreadError(null);
+    setStatus(null);
+    const cached = getCachedThreadDetail(threadId);
+    const hasFreshCache = Boolean(cached);
+
+    if (cached) {
+      hydrateThreadView(cached, { ...options, threadId });
+      setIsLoadingThread(false);
+      prefetchAdjacentThreadDetails(threadId);
+    } else {
+      setIsLoadingThread(true);
+    }
+
+    try {
+      const result = await getMailThread(threadId);
+      if (reqId !== openThreadReqRef.current) return;
+      setThreadDetailCache((prev) => ({
+        ...prev,
+        [threadId]: {
+          timestamp: Date.now(),
+          payload: result.item
+        }
+      }));
+      hydrateThreadView(result.item, { ...options, threadId });
+      void applyMailThreadAction(threadId, "mark_read").catch(() => {});
+      prefetchAdjacentThreadDetails(threadId);
     } catch (error) {
       if (reqId !== openThreadReqRef.current) return;
       setThreadError(error instanceof Error ? error.message : "Failed to load thread");
     } finally {
-      if (reqId === openThreadReqRef.current) {
+      if (reqId === openThreadReqRef.current && !hasFreshCache) {
         setIsLoadingThread(false);
       }
     }
-  }, [gmailAccount, scrollThreadToBottom, threadDraftCache]);
+  }, [getCachedThreadDetail, hydrateThreadView, prefetchAdjacentThreadDetails]);
 
   const openNewCompose = useCallback(() => {
     setOpenedThreadId(null);
@@ -429,25 +504,81 @@ export function InboxShell() {
       const id = openedThreadId ?? selectedThread?.id;
       if (!id) return;
       const currentIndex = threads.findIndex((thread) => thread.id === id);
+      const previousThreads = threads;
+      const previousThreadDetail = threadDetail;
+      const previousCacheEntry = threadDetailCache[id];
       setIsWorking(true);
       setStatus(null);
+
+      if (action === "mark_read" || action === "mark_unread") {
+        const unread = action === "mark_unread";
+        setThreads((prev) => prev.map((thread) => (thread.id === id ? { ...thread, unread } : thread)));
+        setThreadDetail((prev) => {
+          if (!prev || prev.id !== id) return prev;
+          return {
+            ...prev,
+            unread,
+            messages: prev.messages.map((message) => {
+              const labels = new Set(message.labelIds ?? []);
+              if (unread) {
+                labels.add("UNREAD");
+              } else {
+                labels.delete("UNREAD");
+              }
+              return { ...message, labelIds: Array.from(labels) };
+            })
+          };
+        });
+      }
+
+      if (action === "archive" || action === "trash" || action === "snooze") {
+        setThreads((prev) => {
+          const nextThreads = prev.filter((thread) => thread.id !== id);
+          const nextIndex = Math.min(Math.max(currentIndex, 0), Math.max(nextThreads.length - 1, 0));
+          setSelectedIndex(nextIndex);
+          return nextThreads;
+        });
+        setThreadDetail((prev) => {
+          if (!prev || prev.id !== id) return prev;
+          return { ...prev, state: action };
+        });
+      }
+
+      setThreadDetailCache((prev) => {
+        const cached = prev[id];
+        if (!cached) return prev;
+        let nextPayload = cached.payload;
+        if (action === "mark_read" || action === "mark_unread") {
+          const unread = action === "mark_unread";
+          nextPayload = {
+            ...cached.payload,
+            unread,
+            messages: cached.payload.messages.map((message) => {
+              const labels = new Set(message.labelIds ?? []);
+              if (unread) {
+                labels.add("UNREAD");
+              } else {
+                labels.delete("UNREAD");
+              }
+              return { ...message, labelIds: Array.from(labels) };
+            })
+          };
+        }
+        if (action === "archive" || action === "trash" || action === "snooze") {
+          nextPayload = { ...nextPayload, state: action };
+        }
+        return {
+          ...prev,
+          [id]: {
+            timestamp: Date.now(),
+            payload: nextPayload
+          }
+        };
+      });
+
       try {
         await applyMailThreadAction(id, action);
         setStatus(`Applied: ${action}`);
-        if (action === "mark_read") {
-          setThreads((prev) => prev.map((thread) => (thread.id === id ? { ...thread, unread: false } : thread)));
-        }
-        if (action === "mark_unread") {
-          setThreads((prev) => prev.map((thread) => (thread.id === id ? { ...thread, unread: true } : thread)));
-        }
-        if (action === "archive" || action === "trash" || action === "snooze") {
-          setThreads((prev) => {
-            const nextThreads = prev.filter((thread) => thread.id !== id);
-            const nextIndex = Math.min(Math.max(currentIndex, 0), Math.max(nextThreads.length - 1, 0));
-            setSelectedIndex(nextIndex);
-            return nextThreads;
-          });
-        }
         if (action === "archive" || action === "trash" || action === "snooze") {
           closeOpenedThread();
           return;
@@ -457,12 +588,25 @@ export function InboxShell() {
         }
         await refreshThreads();
       } catch (error) {
+        setThreads(previousThreads);
+        setThreadDetail(previousThreadDetail);
+        setThreadDetailCache((prev) => {
+          if (!previousCacheEntry) {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          }
+          return {
+            ...prev,
+            [id]: previousCacheEntry
+          };
+        });
         setStatus(error instanceof Error ? error.message : "Action failed");
       } finally {
         setIsWorking(false);
       }
     },
-    [closeOpenedThread, openedThreadId, refreshThreads, selectedThread?.id, threads]
+    [closeOpenedThread, openedThreadId, refreshThreads, selectedThread?.id, threadDetail, threadDetailCache, threads]
   );
 
   const saveDraft = useCallback(async () => {
