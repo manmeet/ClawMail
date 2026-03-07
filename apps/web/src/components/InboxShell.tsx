@@ -546,6 +546,10 @@ export function InboxShell() {
       const id = openedThreadId ?? selectedThread?.id;
       if (!id) return;
       const currentIndex = threads.findIndex((thread) => thread.id === id);
+      const nextThread =
+        currentIndex >= 0
+          ? threads[currentIndex + 1] ?? threads[currentIndex - 1] ?? null
+          : null;
       const previousThreads = threads;
       const previousThreadDetail = threadDetail;
       const previousCacheEntry = threadDetailCache[id];
@@ -622,6 +626,10 @@ export function InboxShell() {
         await applyMailThreadAction(id, action);
         setStatus(`Applied: ${action}`);
         if (action === "archive" || action === "trash" || action === "snooze") {
+          if (openedThreadId && nextThread?.id) {
+            void openThread(nextThread.id);
+            return;
+          }
           closeOpenedThread();
           return;
         }
